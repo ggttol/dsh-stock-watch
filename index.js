@@ -654,6 +654,335 @@ function apply(ctx) {
   const register = (path, handler) =>
     ctx.effect(() => ctx.webServer.register({ kind: "exact", path, handler }), `dsh-stock-watch: ${path}`);
 
+  // ---- AI 持仓建议引擎（确定性量化内核）----
+  // ---------------------------------------------------------------------------
+  // AI 持仓建议引擎（确定性量化内核）：技术指标 + 关键位推导 + 市场环境 + 新闻聚合。
+  // 设计原则：数值部分全部本地确定性计算（可解释、零延迟）；叙事判断交给 DSH 会话模型。
+  // ---------------------------------------------------------------------------
+  const ADVICE_CACHE_MAX = 24;
+  const adviceCache = new Map(); // apiCode -> { at, result }
+  const ADVICE_TTL_MS = 5 * 60 * 1000;
+
+  const NEWS_CACHE_MAX = 48;
+  const newsCache = new Map(); // "news:bare6"/"ann:bare6" -> { at, items }
+  const NEWS_TTL_MS = 10 * 60 * 1000;
+
+  const ENV_CODES = ["sh000001", "sz399001", "sz399006"];
+  const ENV_NAMES = { sh000001: "上证指数", sz399001: "深证成指", sz399006: "创业板指" };
+
+  function smaLast(vals, n) {
+    if (!Array.isArray(vals) || vals.length < n) return null;
+    let sum = 0;
+    for (let i = vals.length - n; i < vals.length; i++) sum += vals[i];
+    return sum / n;
+  }
+
+  function emaArr(vals, n) {
+    const k = 2 / (n + 1);
+    const out = [];
+    let prev = vals[0];
+    for (let i = 0; i < vals.length; i++) {
+      prev = i === 0 ? vals[0] : vals[i] * k + prev * (1 - k);
+      out.push(prev);
+    }
+    return out;
+  }
+
+  function macdOf(closes) {
+    if (closes.length < 35) return null;
+    const e12 = emaArr(closes, 12);
+    const e26 = emaArr(closes, 26);
+    const dif = e12.map((v, i) => v - e26[i]);
+    const dea = emaArr(dif, 9);
+    const i = closes.length - 1;
+    return { dif: dif[i], dea: dea[i], hist: (dif[i] - dea[i]) * 2, prevHist: (dif[i - 1] - dea[i - 1]) * 2 };
+  }
+
+  function rsiLast(closes, period = 14) {
+    if (closes.length < period + 2) return null;
+    let ag = 0, al = 0;
+    for (let i = 1; i <= period; i++) {
+      const d = closes[i] - closes[i - 1];
+      if (d >= 0) ag += d; else al -= d;
+    }
+    ag /= period; al /= period;
+    for (let i = period + 1; i < closes.length; i++) {
+      const d = closes[i] - closes[i - 1];
+      ag = (ag * (period - 1) + Math.max(d, 0)) / period;
+      al = (al * (period - 1) + Math.max(-d, 0)) / period;
+    }
+    if (al === 0) return 100;
+    return 100 - 100 / (1 + ag / al);
+  }
+
+  function atrLast(candles, period = 14) {
+    if (candles.length < period + 1) return null;
+    let atr = null;
+    for (let i = 1; i < candles.length; i++) {
+      const c = candles[i], p = candles[i - 1];
+      const tr = Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+      atr = atr === null ? tr : (atr * (period - 1) + tr) / period;
+    }
+    return atr;
+  }
+
+  function kdjLast(candles) {
+    if (candles.length < 9) return null;
+    let k = 50, d = 50;
+    for (let i = 8; i < candles.length; i++) {
+      let hh = -Infinity, ll = Infinity;
+      for (let j = i - 8; j <= i; j++) { hh = Math.max(hh, candles[j].high); ll = Math.min(ll, candles[j].low); }
+      const rsv = hh === ll ? 50 : ((candles[i].close - ll) / (hh - ll)) * 100;
+      k = (k * 2 + rsv) / 3;
+      d = (d * 2 + k) / 3;
+    }
+    return { k, d, j: 3 * k - 2 * d };
+  }
+
+  function bollLast(closes, n = 20, mult = 2) {
+    const mid = smaLast(closes, n);
+    if (mid === null) return null;
+    let sq = 0;
+    for (let i = closes.length - n; i < closes.length; i++) sq += (closes[i] - mid) ** 2;
+    const sd = Math.sqrt(sq / n);
+    return { mid, upper: mid + mult * sd, lower: mid - mult * sd };
+  }
+
+  function r2(v) {
+    return Number.isFinite(v) ? Math.round(v * 100) / 100 : null;
+  }
+
+  /** 快照解析（本文件内专用精简版）：fields 序与 qt.gtimg 一致 */
+  function snapFields(fields) {
+    return {
+      name: typeof fields[1] === "string" ? fields[1] : "",
+      price: numField(fields, 3),
+      prevClose: numField(fields, 4),
+      changePct: numField(fields, 32),
+      turnover: numField(fields, 38),
+      pe: numField(fields, 39),
+      amp: numField(fields, 43),
+      floatCap: numField(fields, 44),
+      cap: numField(fields, 45),
+      pb: numField(fields, 46),
+      volumeRatio: numField(fields, 49),
+    };
+  }
+
+  async function fetchSnapshots(codes) {
+    try {
+      const txt = await fetchText(SNAPSHOT_API + codes.join(","), 8000, "gbk");
+      const map = {};
+      for (const line of txt.split(";")) {
+        const m = /v_(\w+)="([^"]*)"/.exec(line);
+        if (!m) continue;
+        map[m[1]] = snapFields(m[2].split("~"));
+      }
+      return map;
+    } catch {
+      return {};
+    }
+  }
+
+  async function fetchStockNews(bare6, name) {
+    const key = "news:" + bare6;
+    const hit = newsCache.get(key);
+    if (hit && Date.now() - hit.at < NEWS_TTL_MS) return hit.items;
+    let items = [];
+    try {
+      const param = encodeURIComponent(JSON.stringify({
+        uid: "", keyword: name, type: ["cmsArticleWebOld"], client: "web", clientType: "web", clientVersion: "curr",
+        param: { cmsArticleWebOld: { searchScope: "default", sort: "time", pageIndex: 1, pageSize: 4, preTag: "", postTag: "" } },
+      }));
+      const txt = await fetchText("https://search-api-web.eastmoney.com/search/jsonp?cb=x&param=" + param, 8000);
+      const m = /x\(([\s\S]*)\)\s*;?\s*$/.exec(txt);
+      const arts = m && JSON.parse(m[1]).result.cmsArticleWebOld || [];
+      items = arts.map((a) => ({
+        title: String(a.title || "").replace(/<[^>]+>/g, "").slice(0, 60),
+        date: String(a.date || "").slice(5, 10),
+      })).filter((x) => x.title);
+    } catch { items = []; }
+    if (newsCache.size >= NEWS_CACHE_MAX) newsCache.delete(newsCache.keys().next().value);
+    newsCache.set(key, { at: Date.now(), items });
+    return items;
+  }
+
+  async function fetchAnnouncements(bare6) {
+    const key = "ann:" + bare6;
+    const hit = newsCache.get(key);
+    if (hit && Date.now() - hit.at < NEWS_TTL_MS) return hit.items;
+    let items = [];
+    try {
+      const j = await fetchJson("https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1&page_size=4&page_index=1&ann_type=A&stock_list=" + bare6, 8000);
+      items = (((j || {}).data || {}).list || []).map((a) => ({
+        title: String(a.title || "").replace(/<[^>]+>/g, "").slice(0, 60),
+        date: String(a.notice_date || "").slice(5, 10),
+      })).filter((x) => x.title);
+    } catch { items = []; }
+    if (newsCache.size >= NEWS_CACHE_MAX) newsCache.delete(newsCache.keys().next().value);
+    newsCache.set(key, { at: Date.now(), items });
+    return items;
+  }
+
+  async function buildAdvice(apiCode, refPrice) {
+    // 1) 日线（含缓存）
+    const kl = await fetchKlineUpstream(apiCode, "day", refPrice);
+    const candles = Array.isArray(kl.candles) ? kl.candles : [];
+    if (candles.length < 40) return { ok: false, error: "K线数据不足（" + candles.length + " 根）" };
+    const closes = candles.map((c) => c.close);
+    const close = closes[closes.length - 1];
+
+    // 2) 快照：个股 + 大盘三指数
+    const snaps = await fetchSnapshots([apiCode, ...ENV_CODES]);
+    const q = snaps[apiCode] || {};
+
+    // 3) 指标
+    const ma = {};
+    for (const n of [5, 10, 20, 60]) ma[n] = r2(smaLast(closes, n));
+    const macd = macdOf(closes);
+    const rsi = rsiLast(closes);
+    const atr = atrLast(candles);
+    const kdj = kdjLast(candles);
+    const boll = bollLast(closes);
+    const vol5 = smaLast(candles.slice(-5).map((c) => c.volume), 5);
+    const vol20 = smaLast(candles.slice(-20).map((c) => c.volume), 20);
+
+    // 4) 关键位：近期摆动高低点 + 布林轨道
+    const last10 = candles.slice(-10), last20 = candles.slice(-20);
+    const swingLow = Math.min(...last10.map((c) => c.low));
+    const swingHigh20 = Math.max(...last20.map((c) => c.high));
+    const atrV = Number.isFinite(atr) && atr > 0 ? atr : close * 0.02;
+    let support2 = Math.min(swingLow, boll ? boll.lower : swingLow);
+    let support1 = Math.min(swingLow, close - 1.2 * atrV);
+    if (support1 <= support2) support1 = support2 + 0.3 * atrV;
+    let resistance1 = boll ? boll.upper : close + 1.5 * atrV;
+    if (resistance1 <= close) resistance1 = close + 1.5 * atrV;
+    let resistance2 = Math.max(swingHigh20, close + 3 * atrV);
+    if (resistance2 <= resistance1) resistance2 = resistance1 + atrV;
+
+    // 5) 评分（-100..+100，每项带权重，全部可解释）
+    let score = 0;
+    const reasons = [];
+    const mas = [ma[5], ma[10], ma[20], ma[60]];
+    let aboveCnt = mas.filter((v) => v !== null && close > v).length;
+    score += aboveCnt * 6 - (4 - aboveCnt) * 4; // ±24
+    if (aboveCnt === 4) reasons.push("均线多头排列");
+    else if (aboveCnt === 0) reasons.push("均线下方弱势");
+    if (macd) {
+      if (macd.dif > macd.dea) { score += 12; reasons.push("MACD 零轴上金叉状态"); }
+      else { score -= 12; reasons.push("MACD 死叉运行"); }
+      if (macd.hist > macd.prevHist) { score += 5; reasons.push("红柱放大动能增强"); }
+      else if (macd.hist < 0 && macd.hist < macd.prevHist) { score -= 5; reasons.push("绿柱放大动能走弱"); }
+    }
+    if (Number.isFinite(rsi)) {
+      if (rsi >= 70) { score -= 6; reasons.push("RSI 超买 (" + Math.round(rsi) + ")"); }
+      else if (rsi <= 30) { score += 8; reasons.push("RSI 超卖 (" + Math.round(rsi) + ")"); }
+      else if (rsi > 55) { score += 6; reasons.push("RSI 强势区 (" + Math.round(rsi) + ")"); }
+      else if (rsi < 45) { score -= 4; reasons.push("RSI 弱势区 (" + Math.round(rsi) + ")"); }
+    }
+    if (kdj) {
+      if (kdj.k > kdj.d && kdj.j < 105) score += 7; else if (kdj.k < kdj.d) score -= 5;
+      if (kdj.j > 110) { score -= 4; reasons.push("KDJ 高位钝化风险"); }
+    }
+    if (boll) {
+      if (close > boll.mid) score += 6; else score -= 4;
+      if (close > boll.upper) { score -= 5; reasons.push("触及布林上轨"); }
+      else if (close < boll.lower) { score += 5; reasons.push("触及布林下轨"); }
+    }
+    if (Number.isFinite(vol5) && Number.isFinite(vol20) && vol20 > 0) {
+      const ratio = vol5 / vol20;
+      if (ratio > 1.2 && close > (ma[5] || close)) { score += 6; reasons.push("量能温和放大"); }
+      else if (ratio > 1.3 && close < (ma[5] || close)) { score -= 8; reasons.push("放量下跌"); }
+    }
+
+    // 6) 评级与操作建议
+    score = Math.max(-100, Math.min(100, Math.round(score)));
+    let rating, action, stance;
+    if (score >= 45) { rating = "偏多"; action = "持有/持股待涨，回踩支撑可加"; stance = "bullish"; }
+    else if (score >= 18) { rating = "谨慎偏多"; action = "持有为主，突破阻力再加仓"; stance = "cautious-bull"; }
+    else if (score > -18) { rating = "中性观望"; action = "区间思路：接近支撑轻仓、接近阻力减仓"; stance = "neutral"; }
+    else if (score > -45) { rating = "谨慎偏空"; action = "反弹减仓，破位离场"; stance = "cautious-bear"; }
+    else { rating = "偏空"; action = "规避/空头思路，反抽不站回 MA20 不接"; stance = "bearish"; }
+
+    // 7) 止损止盈（多头参考系；ATR 自适应 + 结构位优先）
+    const weak = close < (ma[20] || close);
+    const stopRaw = weak ? close - 1.2 * atrV : Math.max(swingLow - 0.25 * atrV, close - 2.2 * atrV);
+    const stop = r2(Math.min(stopRaw, close - 0.8 * atrV));
+    const tp1 = r2(Math.max(resistance1, close + 1.5 * atrV));
+    const tp2 = r2(Math.max(resistance2, close + 3 * atrV));
+    const riskPerShare = Math.max(close - stop, 0.01);
+    const rr = r2((tp1 - close) / riskPerShare);
+
+    // 8) 市场环境
+    const env = [];
+    let envScore = 0;
+    for (const code of ENV_CODES) {
+      const s = snaps[code];
+      if (!s || !Number.isFinite(s.price)) continue;
+      env.push({ code, name: ENV_NAMES[code] || code, price: s.price, changePct: s.changePct });
+    }
+    // 大盘用日线 MA20 位置粗判风偏
+    for (const code of ENV_CODES) {
+      try {
+        const ek = await fetchKlineUpstream(code, "day", null);
+        const ec = (ek.candles || []).map((c) => c.close);
+        const m20 = smaLast(ec, 20);
+        if (m20 !== null && ec[ec.length - 1] > m20) envScore += 1;
+        else envScore -= 1;
+      } catch { /* 单指数失败不影响整体 */ }
+    }
+    const envLabel = envScore >= 2 ? "偏暖（多数指数在 MA20 上方）" : envScore <= -2 ? "偏冷（多数指数在 MA20 下方）" : "震荡分化";
+
+    // 9) 新闻与公告（尽力而为）
+    const bare6 = (/(?:^|[^0-9])([0-9]{6})$/.exec(apiCode) || [])[1] || "";
+    const name = q.name || "";
+    const [news, anns] = await Promise.all([
+      bare6 && name ? fetchStockNews(bare6, name.replace(/\s+/g, "")) : Promise.resolve([]),
+      bare6 ? fetchAnnouncements(bare6) : Promise.resolve([]),
+    ]);
+
+    return {
+      ok: true,
+      code: apiCode,
+      name,
+      price: close,
+      changePct: q.changePct ?? null,
+      pe: q.pe ?? null,
+      pb: q.pb ?? null,
+      turnover: q.turnover ?? null,
+      volumeRatio: q.volumeRatio ?? null,
+      floatCap: q.floatCap ?? null,
+      indicators: {
+        ma, macd: macd ? { dif: r2(macd.dif), dea: r2(macd.dea), hist: r2(macd.hist) } : null,
+        rsi: Number.isFinite(rsi) ? Math.round(rsi * 10) / 10 : null,
+        kdj: kdj ? { k: Math.round(kdj.k * 10) / 10, d: Math.round(kdj.d * 10) / 10, j: Math.round(kdj.j * 10) / 10 } : null,
+        boll: boll ? { upper: r2(boll.upper), mid: r2(boll.mid), lower: r2(boll.lower) } : null,
+        atr: r2(atrV),
+        volRatio520: Number.isFinite(vol5) && Number.isFinite(vol20) && vol20 > 0 ? Math.round((vol5 / vol20) * 100) / 100 : null,
+      },
+      levels: { support1: r2(support1), support2: r2(support2), resistance1: r2(resistance1), resistance2: r2(r2(resistance2)), stop, tp1, tp2, rr },
+      verdict: { score, rating, action, stance, reasons: reasons.slice(0, 5) },
+      marketEnv: { items: env, label: envLabel, score: envScore },
+      news, announcements: anns,
+      generatedAt: Date.now(),
+      disclaimer: "量化参考由本地指标引擎生成，非投资建议；仓位与止损请结合自身风险承受能力。",
+    };
+  }
+
+  async function adviceFor(apiCode, refPrice) {
+    const hit = adviceCache.get(apiCode);
+    if (hit && Date.now() - hit.at < ADVICE_TTL_MS) return hit.result;
+    let result;
+    try {
+      result = await buildAdvice(apiCode, refPrice);
+    } catch (e) {
+      result = { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+    if (adviceCache.size >= ADVICE_CACHE_MAX) adviceCache.delete(adviceCache.keys().next().value);
+    adviceCache.set(apiCode, { at: Date.now(), result });
+    return result;
+  }
+
   register("/dsh-stock-watch/config", async (req, res) => {
     // POST：客户端把分组配置保存到服务器（任意浏览器/设备打开都是同一份）
     if (req.method === "POST") {
@@ -800,6 +1129,16 @@ function apply(ctx) {
     }
   });
 
+  register("/dsh-stock-watch/advice", async (req, res) => {
+    const q = queryOf(req);
+    const code = q.get("code") ?? "";
+    if (!code) { sendJson(res, 400, { ok: false, error: "缺少股票代码" }); return; }
+    const refRaw = parseFloat(q.get("refPrice") ?? "");
+    const refPrice = Number.isFinite(refRaw) && refRaw > 0 ? refRaw : null;
+    const result = await adviceFor(normalizeApiCode(code), refPrice);
+    sendJson(res, 200, result);
+  });
+
   register("/dsh-stock-watch/kline", async (req, res) => {
     const q = queryOf(req);
     const code = q.get("code") ?? "";
@@ -842,7 +1181,9 @@ function apply(ctx) {
       () => sp.section({
         name: "dsh-stock-watch.analysis",
         order: 200,
-        text: "当用户消息以「分析」开头、且意图是分析某家上市公司（而非代码、思路等其他对象）时：依次使用技能 investment-research 完成投资研究分析，再使用技能 frontend-design 生成一个介绍该公司的网站。",
+        text: "两类股票插件请求按不同流程处理：\n"
+          + "① 当用户消息以「分析」开头、且意图是分析某家上市公司（而非代码、思路等其他对象）时：依次使用技能 investment-research 完成投资研究分析，再使用技能 frontend-design 生成一个介绍该公司的网站。\n"
+          + "② 当用户消息包含「【AI持仓研判】」标记时：这是股票插件详情页发来的富上下文研判请求——消息内已含本地量化引擎算出的技术指标/关键位/止损止盈参考/市场环境与新闻标题。此类请求【不要生成网站】，直接输出结构化持仓研判：一、核心结论（持有/减仓/回避 + 置信度%）；二、止损线与止盈线的具体价位及触发逻辑（可基于消息中的量化参考修正，但须说明依据）；三、未来两周关键观察点；四、主要风险因素。结合消息内新闻标题自行补充基本面判断，可调用 investment-research 技能。",
       }),
       "dsh-stock-watch: analysis prompt section",
     );

@@ -211,6 +211,35 @@ window.__ModuleLoader__.load({
   .sk-pill,.sk-row,.sk-tab,.sk-icon{transition:none!important}
 }
 `;
+// —— AI 持仓建议卡片（墨金语义色）——
+styleTag.textContent += `
+.sk-adv{margin:10px 12px 2px;border:1px solid var(--sk-border);border-radius:10px;background:var(--sk-card);overflow:hidden}
+.sk-adv-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;user-select:none}
+.sk-adv-head:hover{background:var(--sk-hover)}
+.sk-adv-badge{font-size:11px;font-weight:800;padding:2px 9px;border-radius:999px;letter-spacing:.5px}
+.sk-adv-badge.bullish,.sk-adv-badge.cautious-bull{background:var(--sk-up-soft);color:var(--sk-up)}
+.sk-adv-badge.neutral{background:var(--sk-border);color:var(--sk-text)}
+.sk-adv-badge.cautious-bear,.sk-adv-badge.bearish{background:var(--sk-down-soft);color:var(--sk-down)}
+.sk-adv-line{display:flex;gap:10px;font-size:11px;color:var(--sk-muted);flex:1;min-width:0;white-space:nowrap;overflow:hidden}
+.sk-adv-line b{color:var(--sk-text);font-weight:700}
+.sk-adv-caret{color:var(--sk-muted);font-size:10px}
+.sk-adv-body{padding:2px 10px 10px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--sk-border)}
+.sk-adv-lv{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+.sk-adv-lv>div{display:flex;flex-direction:column;gap:2px;padding:5px 7px;border-radius:7px;background:var(--sk-bg);border:1px solid var(--sk-border)}
+.sk-adv-lv .lb{font-size:10px;color:var(--sk-muted)}
+.sk-adv-lv .v{font-size:12.5px;font-weight:800;font-variant-numeric:tabular-nums}
+.sk-adv-lv .v.up{color:var(--sk-up)}.sk-adv-lv .v.down{color:var(--sk-down)}
+.sk-adv-chips{display:flex;flex-wrap:wrap;gap:4px}
+.sk-adv-chip{font-size:10px;padding:2px 7px;border-radius:6px;background:var(--sk-bg);border:1px solid var(--sk-border);color:var(--sk-muted);font-variant-numeric:tabular-nums}
+.sk-adv-chip b{color:var(--sk-text)}
+.sk-adv-news{display:flex;flex-direction:column;gap:3px;font-size:11px}
+.sk-adv-news span{color:var(--sk-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sk-adv-news span::before{content:"·";margin-right:5px;color:var(--sk-accent)}
+.sk-adv-foot{font-size:10px;color:var(--sk-muted);opacity:.75}
+.sk-adv-send{align-self:flex-start;background:var(--sk-accent-soft);border:1px solid var(--sk-accent-border);color:var(--sk-accent);border-radius:7px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11.5px;font-weight:700;transition:filter .15s ease}
+.sk-adv-send:hover{filter:brightness(1.12)}
+.sk-adv-err{padding:10px;font-size:11px;color:var(--sk-muted)}
+`;
     document.head.appendChild(styleTag);
 
     // ------------------------------------------------------------------ 常量
@@ -955,6 +984,92 @@ window.__ModuleLoader__.load({
         }
       }, [prevClose, lwc, dark]);
       return react.createElement("div", { ref: boxRef, className: "sk-chart-box", style: fill ? { width: "100%", flex: "1 1 0", minHeight: 160 } : { width: "100%", height } });
+    }
+
+    // ----------------------------------------------- AI 持仓建议卡片（量化内核 + 会话深研入口）
+    function fmtNum(v) {
+      return v === null || v === undefined || !Number.isFinite(Number(v)) ? "—" : String(v);
+    }
+    function AdviceCard(props) {
+      const code = props.code;
+      const [adv, setAdv] = useState(undefined);
+      const [err, setErr] = useState(undefined);
+      const [open, setOpen] = useState(false);
+      useEffect(() => {
+        let alive = true;
+        setAdv(undefined);
+        setErr(undefined);
+        setOpen(false);
+        fetch("/dsh-stock-watch/advice?code=" + encodeURIComponent(code), { headers: { accept: "application/json" } })
+          .then((r) => r.json())
+          .then((j) => { if (alive) { if (j && j.ok) setAdv(j); else setErr((j && j.error) || "生成失败"); } })
+          .catch((e) => { if (alive) setErr(String((e && e.message) || e)); });
+        return () => { alive = false; };
+      }, [code]);
+      if (err !== undefined) {
+        return react.createElement("div", { className: "sk-adv" },
+          react.createElement("div", { className: "sk-adv-err" }, "⚠ AI 建议：", err));
+      }
+      if (adv === undefined) {
+        return react.createElement("div", { className: "sk-adv" },
+          react.createElement("div", { className: "sk-adv-err" }, "⚙ 量化引擎计算中…"));
+      }
+      const v = adv.verdict || {};
+      const lv = adv.levels || {};
+      const ind = adv.indicators || {};
+      const ma = ind.ma || {};
+      const env = adv.marketEnv || {};
+      const newsItems = (adv.news || []).slice(0, 3).concat((adv.announcements || []).slice(0, 2).map((a) => ({ title: "[公告] " + a.title, date: a.date })));
+      const chgStr = adv.changePct === null || adv.changePct === undefined ? "" : " (" + (adv.changePct > 0 ? "+" : "") + adv.changePct + "%)";
+      const deepText = [
+        "【AI持仓研判】" + (adv.name || "") + "（" + code + "）",
+        "现价 " + fmtNum(adv.price) + chgStr + "｜量化评分 " + (v.score > 0 ? "+" : "") + v.score + "（" + v.rating + "）",
+        "技术：MA5 " + fmtNum(ma[5]) + "/MA10 " + fmtNum(ma[10]) + "/MA20 " + fmtNum(ma[20]) + "/MA60 " + fmtNum(ma[60])
+          + "；MACD DIF " + fmtNum(ind.macd && ind.macd.dif) + " DEA " + fmtNum(ind.macd && ind.macd.dea)
+          + "；RSI14 " + fmtNum(ind.rsi) + "；KDJ " + [ind.kdj && ind.kdj.k, ind.kdj && ind.kdj.d, ind.kdj && ind.kdj.j].join("/")
+          + "；ATR14 " + fmtNum(ind.atr),
+        "关键位：支撑 " + fmtNum(lv.support1) + "/" + fmtNum(lv.support2) + " · 阻力 " + fmtNum(lv.resistance1) + "/" + fmtNum(lv.resistance2),
+        "量化建议：止损 " + fmtNum(lv.stop) + " · 止盈 T1 " + fmtNum(lv.tp1) + " / T2 " + fmtNum(lv.tp2) + "（盈亏比 1:" + fmtNum(lv.rr) + "）；信号：" + (v.reasons || []).join("、"),
+        "市场环境：" + (env.label || "") + "；" + (env.items || []).map((x) => x.name + " " + x.price + "(" + (x.changePct > 0 ? "+" : "") + x.changePct + "%)").join(" "),
+        newsItems.length ? "近期资讯：" + newsItems.map((x) => "《" + x.title + "》").join("") : "",
+        "请基于以上量化上下文输出结构化持仓研判：①核心结论（持有/减仓/回避+信心度%）②止损线与止盈线具体价位及触发逻辑（可修正量化参考值并说明依据）③未来两周关键观察点④主要风险。可调用 investment-research 技能补充基本面。",
+      ].filter(Boolean).join("\n");
+      return react.createElement("div", { className: "sk-adv" },
+        react.createElement("div", { className: "sk-adv-head", onClick: () => setOpen((o) => !o) },
+          react.createElement("span", { className: "sk-adv-badge " + (v.stance || "neutral") }, v.rating || "—"),
+          react.createElement("span", { className: "sk-adv-line" },
+            "止损 ", react.createElement("b", null, fmtNum(lv.stop)),
+            " · 止盈 ", react.createElement("b", null, fmtNum(lv.tp1)),
+            " · 盈亏比 ", react.createElement("b", null, "1:" + fmtNum(lv.rr))),
+          react.createElement("span", { className: "sk-adv-caret" }, open ? "▾" : "▸")),
+        open && react.createElement("div", { className: "sk-adv-body" },
+          react.createElement("div", { className: "sk-adv-lv" },
+            react.createElement("div", null,
+              react.createElement("span", { className: "lb" }, "止损线"),
+              react.createElement("span", { className: "v down" }, fmtNum(lv.stop))),
+            react.createElement("div", null,
+              react.createElement("span", { className: "lb" }, "支撑"),
+              react.createElement("span", { className: "v" }, fmtNum(lv.support1))),
+            react.createElement("div", null,
+              react.createElement("span", { className: "lb" }, "阻力/止盈T1"),
+              react.createElement("span", { className: "v up" }, fmtNum(lv.tp1))),
+            react.createElement("div", null,
+              react.createElement("span", { className: "lb" }, "止盈T2"),
+              react.createElement("span", { className: "v up" }, fmtNum(lv.tp2)))),
+          react.createElement("div", { className: "sk-adv-chips" },
+            [["PE", adv.pe], ["PB", adv.pb], ["换手%", adv.turnover], ["量比", adv.volumeRatio],
+             ["RSI14", ind.rsi], ["ATR14", ind.atr], ["MACD柱", ind.macd && ind.macd.hist]].map(([k, val]) =>
+              react.createElement("span", { key: k, className: "sk-adv-chip" }, k, " ", react.createElement("b", null, fmtNum(val))))),
+          react.createElement("div", { className: "sk-adv-news" },
+            (env.items || []).map((x) => react.createElement("span", { key: x.code },
+              x.name + " " + x.price + " (" + (x.changePct > 0 ? "+" : "") + x.changePct + "%) — " + (env.label || ""))),
+            newsItems.map((x, i) => react.createElement("span", { key: i }, "[" + (x.date || "") + "] " + x.title))),
+          (v.reasons && v.reasons.length) ? react.createElement("div", { className: "sk-adv-foot" }, "信号：", v.reasons.join("；")) : null,
+          props.sendAnalysis ? react.createElement("button", {
+            className: "sk-adv-send",
+            onClick: () => props.sendAnalysis(deepText, "AI 持仓研判"),
+          }, "🤖 发送到会话深度分析") : null,
+          react.createElement("div", { className: "sk-adv-foot" }, adv.disclaimer || "")));
     }
 
     // ----------------------------------------------- 指标网格（自选股风格详情摘要）
@@ -2076,6 +2191,7 @@ window.__ModuleLoader__.load({
           react.createElement("div", { className: "sk-detail-body" },
             chartEl,
             react.createElement(StatGrid, { row }),
+            react.createElement(AdviceCard, { code: view.code, dark, sendAnalysis }),
             react.createElement(OrderBook, { row })),
           react.createElement("div", { className: "sk-detail-foot" },
             react.createElement("span", null, footText),

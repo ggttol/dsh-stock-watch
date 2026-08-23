@@ -1,7 +1,7 @@
 {
   "name": "dsh-stock-watch",
-  "version": "1.1.2",
-  "description": "A股自选股实时行情盯盘插件 - DeepSeek Harness Web 右上角可折叠弹窗（分时/K线/目标价/主题切换/可拖动/添加股票分组）；v1.1.0 本地优化版：批量快照+五档盘口+深度指标+分钟级K线+到价提醒+列表排序+时段感知轮询",
+  "version": "1.2.0",
+  "description": "A股自选股实时盯盘插件 - DeepSeek Harness Web 右上角可折叠弹窗；v1.2.0 新增 AI 持仓建议引擎：技术指标量化评分/止损止盈线推导/市场环境/新闻聚合/一键会话深度研判",
   "type": "module",
   "main": "index.js",
   "exports": {
