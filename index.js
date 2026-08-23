@@ -769,7 +769,7 @@ function apply(ctx) {
     };
   }
 
-  async function fetchSnapshots(codes) {
+  async function fetchSnapshotsMini(codes) {
     try {
       const txt = await fetchText(SNAPSHOT_API + codes.join(","), 8000, "gbk");
       const map = {};
@@ -833,7 +833,7 @@ function apply(ctx) {
     const close = closes[closes.length - 1];
 
     // 2) 快照：个股 + 大盘三指数
-    const snaps = await fetchSnapshots([apiCode, ...ENV_CODES]);
+    const snaps = await fetchSnapshotsMini([apiCode, ...ENV_CODES]);
     const q = snaps[apiCode] || {};
 
     // 3) 指标
