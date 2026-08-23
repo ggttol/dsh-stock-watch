@@ -213,8 +213,8 @@ window.__ModuleLoader__.load({
 `;
 // —— AI 持仓建议卡片（墨金语义色）——
 styleTag.textContent += `
-.sk-adv{margin:10px 12px 2px;border:1px solid var(--sk-border);border-radius:10px;background:var(--sk-card);overflow:hidden}
-.sk-adv-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;user-select:none}
+.sk-adv{margin:6px 10px 2px;flex-shrink:0;border:1px solid var(--sk-border);border-radius:10px;background:var(--sk-card);overflow:hidden}
+.sk-adv-head{display:flex;align-items:center;gap:8px;padding:5px 10px;cursor:pointer;user-select:none}
 .sk-adv-head:hover{background:var(--sk-hover)}
 .sk-adv-badge{font-size:11px;font-weight:800;padding:2px 9px;border-radius:999px;letter-spacing:.5px}
 .sk-adv-badge.bullish,.sk-adv-badge.cautious-bull{background:var(--sk-up-soft);color:var(--sk-up)}
@@ -2189,9 +2189,9 @@ styleTag.textContent += `
                 }))),
           // 图表 + 指标网格 + 五档盘口：放入可滚动区，避免详情内容超高被裁剪
           react.createElement("div", { className: "sk-detail-body" },
+            react.createElement(AdviceCard, { code: view.code, dark, sendAnalysis }),
             chartEl,
             react.createElement(StatGrid, { row }),
-            react.createElement(AdviceCard, { code: view.code, dark, sendAnalysis }),
             react.createElement(OrderBook, { row })),
           react.createElement("div", { className: "sk-detail-foot" },
             react.createElement("span", null, footText),
