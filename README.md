@@ -1,59 +1,81 @@
 <h1 align="center">dsh-stock-watch</h1>
 <p align="center">
-  <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="Awesome DSH Plugin"></a>
-  <a href="https://www.npmjs.com/package/dsh-stock-watch"><img src="https://img.shields.io/npm/v/dsh-stock-watch?style=flat-square&color=00ff41&labelColor=050607" alt="npm version"></a>
-  <a href="https://github.com/Awu12277/dsh-stock-watch"><img src="https://img.shields.io/github/stars/Awu12277/dsh-stock-watch?style=flat-square&color=00ff41&labelColor=050607" alt="GitHub stars"></a>
-  <img src="https://img.shields.io/badge/license-MIT-ff1493?style=flat-square&labelColor=050607" alt="MIT">
+  <a href="https://github.com/Awu12277/dsh-stock-watch"><img src="https://img.shields.io/badge/upstream-Awu12277%2Fv1.0.8-blue?style=flat-square" alt="upstream"></a>
+  <img src="https://img.shields.io/badge/version-1.2.2-f0b429?style=flat-square&labelColor=10141f" alt="version">
+  <img src="https://img.shields.io/badge/license-MIT-ff4560?style=flat-square&labelColor=10141f" alt="MIT">
 </p>
 
+> **增强版 Fork**：基于 [Awu12277/dsh-stock-watch](https://github.com/Awu12277/dsh-stock-watch) v1.0.8（MIT）深度改造——
+> 全新「墨金行情终端」界面、AI 持仓建议引擎（技术指标评分 + 止损止盈线推导）、性能与稳定性大幅强化。
+> 改动明细见 [OPTIMIZATIONS.md](OPTIMIZATIONS.md)。
 
-
-
-A 股自选股实时行情**盯盘插件**：在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的**右上角**显示一个可折叠弹窗，实时监控自选股行情、切换分组、查看分时与 K 线、设置买卖目标价。
+A 股自选股实时行情**盯盘插件**：在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的**右上角**显示一个可折叠弹窗，实时监控自选股行情、查看分时/K 线/五档盘口，并由本地量化引擎与 DSH 会话 AI 给出**每只股票的持有建议与止损止盈线**。
 
 数据源与原终端 CLI 项目 [stocking](https://github.com/Awu12277/stocking) 同源（腾讯财经），配色沿用 A 股红涨绿跌惯例。
 
 ## 安装
 
-已发布到 npm，一条命令安装到你的 web profile：
-
 ```bash
-dsh plugin --profile web add dsh-stock-watch
+dsh plugin --profile web add github:ggttol/dsh-stock-watch
 ```
 
-- 本地开发安装：`dsh plugin --profile web add file:D:\projects\github\dsh-stock-watch`
-- 或直接通过 git：`dsh plugin --profile web add github:Awu12277/dsh-stock-watch`
+- 本地开发安装：`dsh plugin --profile web add file:/path/to/dsh-stock-watch`
 - 安装后**重启 `dsh web` 生效**；卸载：`dsh plugin --profile web remove dsh-stock-watch`
 
-安装完成后，刷新页面，右上角出现「📈 自选股」药丸。
+安装完成后刷新页面，右上角出现「📈 自选股」药丸。
 
 ## 截图
 
-| 折叠药丸（右上角实时涨跌家数） | 暗色列表（分组 + 分时迷你折线 + 目标价触发） |
+| 折叠药丸（右上角实时涨跌统计） | 暗色列表（分组 + 分时迷你折线 + 目标价触发） |
 |---|---|
 | ![pill](screenshots/pill.png) | ![list-dark](screenshots/list-dark.png) |
 
-| 暗色·分时（价格线 / 均价线 / 昨收基准） | 暗色·日 K（TradingView Lightweight Charts） |
+| 详情·日 K（置顶 AI 建议条 + Lightweight Charts 蜡烛图） | AI 持仓建议卡片展开（关键位/指标芯片/市场环境/资讯） |
 |---|---|
-| ![minute](screenshots/detail-minute-dark.png) | ![kline](screenshots/detail-kline-dark.png) |
+| ![kline](screenshots/detail-kline-dark.png) | ![advice](screenshots/advice-card.png) |
 
-| 浅色主题 |
-|---|
-| ![light](screenshots/light.png) |
+| 暗色·分时（价格线 / 均价线 / 昨收基准） | 浅色主题 |
+|---|---|
+| ![minute](screenshots/detail-minute-dark.png) | ![light](screenshots/light.png) |
+
+## ✨ AI 持仓建议引擎（v1.2.0 新增）
+
+**双层智能架构**：数值部分本地确定性计算（可解释、零延迟），叙事判断交给 DSH 会话模型。
+
+### 第一层：量化内核（`/dsh-stock-watch/advice`）
+
+打开任意股票详情，顶部即见建议条：
+
+```
+[谨慎偏空]  止损 9.67 · 止盈 12.42 · 盈亏比 1:2.1    ▸
+```
+
+- **指标引擎**：MA5/10/20/60 排列 · MACD(12,26,9) · RSI14(Wilder) · KDJ(9,3,3) · BOLL(20,2) · ATR14 · 量比(5日/20日)
+- **加权评分** −100~+100 → 五档评级（偏多 / 谨慎偏多 / 中性观望 / 谨慎偏空 / 偏空），每条信号理由可解释
+- **止损止盈线**：趋势强时结构位优先（波段低点 − 0.25ATR 与 close−2.2ATR 取高）；弱势收紧至 close−1.2ATR；止盈 T1=阻力位、T2=波段高点或 3ATR，附盈亏比
+- **市场环境**：上证 / 深成 / 创业板三指数 MA20 风偏判定（偏暖 / 震荡分化 / 偏冷）
+- **资讯聚合**：东财个股新闻 + 公司公告自动进卡片（各缓存 10 分钟）
+- 展开可见四格关键位（止损/支撑/阻力T1/T2）、指标芯片（PE/PB/换手/量比…）、信号理由与非投资建议声明
+
+### 第二层：会话深度研判
+
+「🤖 发送到会话深度分析」把完整量化上下文组装成【AI持仓研判】富消息送入新 DSH 会话，
+模型输出结构化研判：①核心结论与信心度 ②修正后止损止盈及依据 ③未来两周观察点 ④风险因素——可联动 `investment-research` 技能补充基本面。
 
 ## 功能特性
 
-- **右上角可折叠弹窗**：折叠时显示自选股实时涨跌家数药丸；展开为完整列表，点击任意行进入详情
-- **胶囊可拖动**：按住「📈 自选股」药丸可拖到屏幕任意位置，面板随之跟随（右边缘对齐）；展开后按住面板头部也可拖动；位置持久化到 localStorage。**拖到屏幕四边自动吸附**，贴边后胶囊变为**半球**（屏幕边缘显示涨/跌家数，如 `3↑0↓`），点击仍可展开面板
-- **多分组自选股**：分组 tab 切换（分组名 + 股票数），配置以**服务器 `~/.stocking/settings.json` 为唯一数据源**（v1.2.0 起，任意浏览器/设备打开都是同一份）
-- **实时行情列表**：名称 / 代码、现价、涨跌幅、分时迷你折线、目标价触发标记（买入 / 卖出 / 等待 / -），每 10s 自动刷新（带倒计时）
-- **分时视图**：全天分钟价格线（红涨绿跌）+ 黄色均价线（VWAP）+ 昨收虚线基准，时间轴按 **A 股交易时段（北京时间 09:30–11:30 / 13:00–15:00）** 标注，午间休市留白
-- **K 线视图**：日 K / 周 K / 月 K 前复权蜡烛图 + 成交量柱 + **MA 均线（MA5 白 / MA10 黄 / MA20 紫 / MA60 绿，A 股配色，右上角可自定义隐藏/显示，配置存 localStorage）**，支持 **`+ / − / 重置` 按钮缩放 K 线**（位于 MA 均线配置左侧），基于 [TradingView Lightweight Charts](https://tradingview.github.io/lightweight-charts/docs)（CDN 懒加载，失败自动降级为自绘 SVG）
-- **目标价可编辑**：详情页点击「买入目标 / 卖出目标」进入输入框（数字 + 两位小数、留空清除、回车确认 / Esc 取消），即时重算触发标记并持久化
-- **一键投资研究报告**：详情页「📈 投资研究报告」按钮——**新建一个 DSH 对话**并发送简短消息 `分析{公司名}（代码）`，由会话中的 agent 自动使用 `investment-research` 完成投资研究、`frontend-design` 生成介绍网站（技能指令由 host 端条件式系统提示注入，仅对「分析某家上市公司」类请求生效）；按钮带防抖（进行中禁用，防连点重复建会话）
-- **胶囊悬浮扇形菜单**：鼠标移到胶囊（含贴边吸附态）触发 **GSAP 扇形动画**，展开 **📊 行情分析 / 📅 每日复盘 / 🚀 涨停分析** 三个选项（方向按胶囊位置自动选择象限、不越出屏幕；鼠标在扇形区域内不收起，移出才收回）。点击选项同样**新开一个 DSH 对话**并发送简短关键词（如 `每日复盘`），完整提示词（A股短线复盘框架 / 行情分析 4 项 / 涨停分析 4 项）由 host 端条件式系统提示**注入**、不暴露在消息里；「每日复盘」仅在 **15:00–次日 9:00** 可点击，交易时段置灰并提示"还未收盘"；拖动/吸附后扇形自动归位重开
-- **安装时自动注入技能**：插件首次启动时把自带的 `investment-research`、`frontend-design` 两个技能复制到用户技能目录 `~/.agents/skills/`（已存在则跳过、不覆盖用户版本；`DSH_STOCK_WATCH_NO_SKILLS=1` 可禁用，`DSH_STOCK_WATCH_SKILLS_DIR` 可改目标目录）
-- **暗色 / 浅色主题**：CSS 变量两套配色，默认暗色，☀️/🌙 一键切换（图表配色联动）
+- **右上角可折叠弹窗**：折叠时显示自选股实时涨跌统计；展开为完整列表，点击任意行进入详情
+- **八方向窗口缩放**（v1.2.2）：四边 + 四角热区任意拉伸，对侧边缘固定，视口边界钳制；AI 建议条置顶，小面板免滚动可见
+- **胶囊可拖动 + 边缘吸附**：按住药丸拖到屏幕任意位置，拖到四边自动吸附为半球（显示涨/跌家数 `3↑0↓`）
+- **多分组自选股**：分组 tab 切换，配置以服务器文件为唯一数据源（多端同源）
+- **实时行情列表**：现价 / 涨跌幅 / 分时迷你折线 / 目标价触发标记，10s 自动刷新；⇅ 一键循环排序
+- **分时视图**：分钟价格线 + 均价线(VWAP) + 昨收基准，A 股交易时段时间轴
+- **K 线视图**：日K / 周K / 月K 前复权蜡烛 + 成交量 + MA5/10/20/60 均线显隐，`+/−/重置` 缩放；支持沪深主板 / 创业板 / 科创板 / **北交所 / 港股 / 美股**代码；基于 [TradingView Lightweight Charts](https://tradingview.github.io/lightweight-charts/docs)，CDN 失败自动降级自绘 SVG
+- **到价提醒**：设置买入/卖出目标价后，价格触发跃迁弹系统通知
+- **一键投资研究报告**：「📈 投资研究报告」新建对话发送 `分析{公司名}`，agent 自动完成 investment-research 研究 + frontend-design 网站
+- **悬浮扇形菜单**：GSAP 扇形动画展开 📊 行情分析 / 📅 每日复盘 / 🚀 涨停分析（每日复盘仅收盘后可用），新开对话执行
+- **暗色 / 浅色主题**：☀️/🌙 一键切换，图表配色联动
+- **安装时自动注入技能**：`investment-research`、`frontend-design` 复制到 `~/.agents/skills/`（不覆盖已有）
 
 ## 架构
 
@@ -62,59 +84,30 @@ dsh plugin --profile web add dsh-stock-watch
 │  client.js（客户端插件模块）              │
 │  · shell.overlay 槽位 → 右上角弹窗        │
 │  · React + Lightweight Charts + SVG 降级  │
-│  · 配置服务器持久化（settings.json）        │
 │          │ fetch（同源 /dsh-stock-watch/*）│
 └──────────┼────────────────────────────────┘
            ▼
 ┌─────────────── DSH Host（index.js）───────┐
-│  cordis 插件：webServer 注册 5 个路由      │
-│  · /config   读取 ~/.stocking/settings.json│
-│  · /stocks   全 A 股搜索（本地池检索）     │
-│  · /quotes   实时行情（腾讯分钟接口）      │
-│  · /kline    日/周/月 K 线（fqkline）      │
-│  · /minute   分时详情（分钟点 + 昨收）     │
+│  cordis 插件：webServer 注册 7 个路由      │
+│  · /config   分组与目标价持久化            │
+│  · /stocks   全 A 股搜索                  │
+│  · /quotes   实时行情批量快照              │
+│  · /kline    日/周/月/分钟级 K 线          │
+│  · /minute   分时详情                     │
+│  · /advice   AI 持仓建议（量化引擎）★new   │
+│  · 系统提示注入：分析/研判/复盘指令          │
 └───────────────────────────────────────────┘
 ```
 
 ### 数据源
 
-- 行情快照 + 分时：`https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={code}&r=0.1`
-- 日/周/月 K 线：`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},{period},,,{count},qfq`
+- 行情快照 + 分时：`web.ifzq.gtimg.cn/appstock/app/minute/query`
+- 日/周/月 K 线：`web.ifzq.gtimg.cn/appstock/app/fqkline/get`（前复权，港美股自动回退不复权键）
+- 分钟级 K 线：`ifzq.gtimg.cn/appstock/app/kline/mkline`（沪深；港美股不支持分钟级）
+- 个股新闻：东财搜索 API（按公司名）；公告：东财公告 API（按代码）
 
-解析逻辑（字段索引、K 线 `[date, open, close, high, low, volume]` 列序、昨收由 `现价/(1+涨跌幅%)` 反推）与 [stocking 的 market.ts](https://github.com/Awu12277/stocking/blob/main/src/market.ts) 保持一致。Host 端使用 Node 原生 `fetch` 直连（部署即使未挂载 web fetch provider 或沙箱封锁网络，本插件也不受影响）。
-
-## 目录结构
-
-```
-dsh-stock-watch/
-├── index.js           # node 端 cordis 插件（webServer 路由 + 技能注入 + 系统提示指令）
-├── client.js          # 浏览器端客户端模块（__ModuleLoader__ + shell.overlay 槽位）
-├── cordis.patch.yml   # 组合补丁：插入 host 插件行（dsh.bundle.patch）
-├── package.json       # dsh.bundle + dsh.client 声明
-├── data/              # 全 A 股股票池（a_stocks.json，5549 只）
-├── skills/            # 随包技能（investment-research / frontend-design，启动时注入用户技能目录）
-├── scripts/           # 本地测试脚本（smoke / probe / skills 注入验证）
-├── screenshots/       # 运行截图
-└── README.md
-```
-
-`dsh plugin add` 即 profile 目录内的 `pnpm add`：安装后按 package.json 的 `dsh.bundle.patch` 自动并入 profile 层栈，`dsh.client` 声明自动挂载浏览器端模块。
-
-## 交互说明
-
-| 状态 | 操作 |
-|---|---|
-| 药丸 | 点击展开 · 按住拖动（拖到屏幕边缘自动吸附为半球，显示涨/跌家数）· 悬停弹出扇形菜单（行情分析/每日复盘/涨停分析，新开对话执行） |
-| 列表 | 分组 tab 切换 · 点击行进详情 · ⟳ 手动刷新 · — 折叠 · ☀️/🌙 切主题 |
-| 详情 | ← 返回 · 分时 / 日K / 周K / 月K 切换 · 📈 投资研究报告（新建对话一键分析）· 点击买入/卖出目标编辑 · K线 `+`/`−`/`重置` 缩放 |
-
-## 配置与持久化
-
-- 自选股配置（分组、代码、买卖目标价）以**服务器文件 `~/.stocking/settings.json` 为唯一数据源**（`GET/POST /dsh-stock-watch/config`，原子写，清洗 + 跨组去重后落盘），任意浏览器 / 设备 / 清缓存后打开均为同一份数据
-- 浏览器 `localStorage`（key：`stocking.config.v1`）仅作离线缓存：服务器不可达时降级使用；服务器尚无配置而本地有 → 自动反向迁移上传
-- 配置修改防抖 600ms 同步到服务器（连续编辑只发最后一次）；多端并发编辑为 last-write-wins
-- 重置：删除 `~/.stocking/settings.json` 并 `localStorage.removeItem('stocking.config.v1')` 后刷新页面
+解析逻辑与 [stocking 的 market.ts](https://github.com/Awu12277/stocking/blob/main/src/market.ts) 同源。Host 端使用 Node 原生 `fetch` 直连。
 
 ## License
 
-MIT
+MIT © Awu12277（上游）· 增强版改动同样以 MIT 发布
