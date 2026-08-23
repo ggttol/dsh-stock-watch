@@ -94,9 +94,17 @@ window.__ModuleLoader__.load({
 .sk-tab-del:hover{color:var(--sk-up)}
 .sk-del{background:transparent;border:none;color:var(--sk-muted);cursor:pointer;font-size:11px;padding:0 2px;width:18px;flex:none;border-radius:4px}
 .sk-del:hover{color:var(--sk-up);background:var(--sk-hover)}
-.sk-resize{position:absolute;width:14px;height:14px;z-index:6;opacity:.5}
-.sk-resize:hover{opacity:1}
-.sk-resize-br{bottom:0;right:0;cursor:nwse-resize;border-bottom-right-radius:10px;background:linear-gradient(315deg,transparent 62%,var(--sk-muted) 62%,var(--sk-muted) 75%,transparent 75%)}
+.sk-resize{position:absolute;z-index:6;opacity:.35;transition:opacity .15s ease,background-color .15s ease}
+.sk-resize:hover{opacity:1;background:var(--sk-accent-soft)}
+.sk-resize-n{top:0;left:14px;right:14px;height:5px;cursor:ns-resize}
+.sk-resize-s{bottom:0;left:14px;right:14px;height:5px;cursor:ns-resize}
+.sk-resize-e{right:0;top:14px;bottom:14px;width:5px;cursor:ew-resize}
+.sk-resize-w{left:0;top:14px;bottom:14px;width:5px;cursor:ew-resize}
+.sk-resize-ne,.sk-resize-nw,.sk-resize-se,.sk-resize-sw{width:14px;height:14px}
+.sk-resize-ne{top:0;right:0;cursor:nesw-resize}
+.sk-resize-nw{top:0;left:0;cursor:nwse-resize}
+.sk-resize-se{bottom:0;right:0;cursor:nwse-resize;border-bottom-right-radius:10px;background:linear-gradient(315deg,transparent 55%,var(--sk-muted) 55%,var(--sk-muted) 72%,transparent 72%)}
+.sk-resize-sw{bottom:0;left:0;cursor:nesw-resize;border-bottom-left-radius:10px;background:linear-gradient(45deg,transparent 55%,var(--sk-muted) 55%,var(--sk-muted) 72%,transparent 72%)}
 .sk-right{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}
 .sk-countdown{color:var(--sk-muted);white-space:nowrap;font-size:11px}
 .sk-icon{background:transparent;border:none;color:var(--sk-muted);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:6px;font-family:inherit;transition:color .15s ease,background-color .15s ease}
@@ -1764,11 +1772,34 @@ styleTag.textContent += `
           const dx = e.clientX - d.startX;
           const dy = e.clientY - d.startY;
           if (d.mode === "resize") {
-            // 右下角：向右/下拉伸；左下角：向左/下拉伸（宽高钳制）
-            const dw = d.handle === "br" ? dx : -dx;
-            const w = Math.min(PANEL_MAX_W, Math.max(PANEL_MIN_W, d.baseW + dw));
-            const h = Math.min(PANEL_MAX_H, Math.max(PANEL_MIN_H, d.baseH + dy));
+            // 八方向拉伸：固定对侧边缘，移动被拖边缘；宽高与位置同步钳制
+            const hdl = d.handle || "se";
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            let left = d.baseX;
+            let top = d.baseY;
+            let w = d.baseW;
+            let h = d.baseH;
+            if (hdl.indexOf("e") >= 0) w = Math.max(PANEL_MIN_W, Math.min(PANEL_MAX_W, d.baseW + dx));
+            if (hdl.indexOf("s") >= 0) h = Math.max(PANEL_MIN_H, Math.min(PANEL_MAX_H, d.baseH + dy));
+            if (hdl.indexOf("w") >= 0) {
+              const right = d.baseX + d.baseW;
+              left = Math.max(8, Math.min(right - PANEL_MIN_W, d.baseX + dx));
+              w = Math.min(PANEL_MAX_W, right - left);
+              left = right - w;
+            }
+            if (hdl.indexOf("n") >= 0) {
+              const bottom = d.baseY + d.baseH;
+              top = Math.max(8, Math.min(bottom - PANEL_MIN_H, d.baseY + dy));
+              h = Math.min(PANEL_MAX_H, bottom - top);
+              top = bottom - h;
+            }
+            if (left + w > vw - 8) { w = Math.max(PANEL_MIN_W, vw - 8 - left); }
+            if (top + h > vh - 8) { h = Math.max(PANEL_MIN_H, vh - 8 - top); }
             setSize({ w, h });
+            // pos 存的是「胶囊对齐锚点」语义：反解出使面板左缘落在 left 的锚点
+            const pw2 = pillWidthRef.current || PILL_W;
+            setPos({ x: left + PANEL_W - pw2, y: top });
             notifyChartResize();
             return;
           }
@@ -1931,10 +1962,15 @@ styleTag.textContent += `
       // 按住面板左下/右下角拉伸尺寸
       const startResize = useCallback((e, handle) => {
         if (e.button !== 0) return;
-        const base = size || { w: 400, h: 0 };
+        // 以面板真实矩形为基准（未手动拉伸过时 size 为空，内容高度同样可缩放）
+        const panelEl = e.currentTarget.parentElement;
+        const rect = panelEl ? panelEl.getBoundingClientRect() : null;
+        const base = size || { w: rect ? Math.round(rect.width) : 400, h: rect ? Math.round(rect.height) : 360 };
         dragRef.current = {
           startX: e.clientX,
           startY: e.clientY,
+          baseX: rect ? rect.left : 100,
+          baseY: rect ? rect.top : 100,
           baseW: base.w,
           baseH: base.h,
           moved: true,
@@ -1985,7 +2021,8 @@ styleTag.textContent += `
       }, theme === "dark" ? "☀️" : "🌙");
 
       // 面板右下角拉伸手柄（列表页与详情页共用）
-      const resizeHandles = react.createElement("div", { className: "sk-resize sk-resize-br", title: "拉伸面板", onMouseDown: (e) => startResize(e, "br") });
+      const resizeHandles = [["n", ""], ["s", ""], ["e", ""], ["w", ""], ["ne", ""], ["nw", ""], ["se", "拉伸面板"], ["sw", ""]].map(([dir, tip]) =>
+        react.createElement("div", { key: dir, className: "sk-resize sk-resize-" + dir, title: tip, onMouseDown: (e) => startResize(e, dir) }));
 
       const sortCycle = useCallback(() => {
         setSortMode((cur) => {

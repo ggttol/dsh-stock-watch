@@ -1,6 +1,6 @@
 {
   "name": "dsh-stock-watch",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "A股自选股实时盯盘插件 - DeepSeek Harness Web 右上角可折叠弹窗；v1.2.0 新增 AI 持仓建议引擎：技术指标量化评分/止损止盈线推导/市场环境/新闻聚合/一键会话深度研判",
   "type": "module",
   "main": "index.js",
