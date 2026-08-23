@@ -1,0 +1,112 @@
+# dsh-stock-watch 优化记录（2026-08-22）
+
+基于上游 v1.0.8 的本地优化版（当前 **v1.1.1**：性能优化 + 自选股式深度功能 + 「墨金行情终端」界面重设计）。**源码以本目录为准**；若日后 `dsh plugin` 升级覆盖了
+node_modules 里的副本，按「部署」一节重新覆盖即可。
+
+## v1.1.1 界面重设计（墨金行情终端）
+
+设计语言：深墨蓝底 × 琥珀金强调 × A股红涨绿跌语义色，等宽数字 tabular-nums 对齐，玻璃拟态 + 精细阴影层级。
+
+| 改动 | 细节 |
+|---|---|
+| 语义色升级 | UP `#ff1493`品红→`#ff4560`正红、DOWN `#00ff41`荧光绿→`#00c883`沉稳绿；图表/徽章/盘口全局联动 |
+| 价格闪烁 ✨ | 每轮轮询价格变动时数字底色脉冲（涨红/跌绿），列表与详情大价均生效——盯盘最有价值的微交互 |
+| 市场情绪灯 | 列表头部底缘 2px 双色比例条，按涨/跌家数占比着色，一眼读市 |
+| 胶囊分段条 | 折叠药丸的涨跌家数改为双色 meter 条 + 计数 |
+| 涨跌幅徽章化 | 涨跌幅带语义色浅底圆角块，扫读更快 |
+| 指标卡片化 | 详情指标网格改「标签上/数值下」小卡片 |
+| 盘口渐变量条 | 五档量条改透明渐变，Level-2 质感 |
+| 动效体系 | 面板入场 skPop、hover 微交互、focus-visible 可达性、prefers-reduced-motion 全尊重 |
+| 字体 | 数字 ui-monospace 栈（JetBrains Mono 优先）+ tabular-nums；中文 PingFang/雅黑 |
+
+验证：Playwright 计算样式断言 19/19 通过、页面错误 0、暗/亮主题切换正常。
+
+## v1.1.0 深度功能（参考腾讯自选股 App）
+
+| 功能 | 说明 | 数据来源 |
+|---|---|---|
+| 指标网格 | 详情页新增 今开/昨收/最高/最低/换手率/量比/振幅/总额/PE(TTM)/PB/流通值/总值/涨停价/跌停价 | 批量快照扩展字段，**零新增请求** |
+| 五档盘口 | 买一~买五 / 卖一~卖五 价量，量条按档内最大量归一，价格相对昨收红涨绿跌；指数自动隐藏 | 同上 |
+| 分钟级 K 线 | 周期选择器新增 5分/15分/30分/60分（各 320 根，UNIX 秒时间轴），MA/缩放可用 | `ifzq.gtimg.cn/appstock/app/kline/mkline`（注意 web.ifzq 会 301），30s 缓存 |
+| 到价提醒 🔔 | 自选股招牌功能：设置买卖目标价后，触发瞬间弹浏览器系统通知；状态跃迁去重防重复弹；页面隐藏时保留 120s 保活轮询使后台也能提醒；开关持久化 `stocking.alert.v1` | 客户端 Notification API + 现有行情轮询 |
+| 列表排序 ⇅ | 表头按钮循环 默认/涨幅↓/涨幅↑/现价↓，未成交行排最后 | 客户端本地排序 |
+
+### v1.1.0 接口验证要点
+- `qt.gtimg.cn` 批量快照共 88 个字段：[4]昨收 [5]今开 [9-18]买五档 [19-28]卖五档 [38]换手 [39]PE(TTM) [43]振幅 [44]流通市值(亿) [45]总市值(亿) [46]PB [47]涨停 [48]跌停 [49]量比；指数无五档、部分字段为空 → 全部按 null 降级
+- 分钟 K 行结构 `[YYYYMMDDHHmm, open, close, high, low, vol]`，与日 K 同列序；time 必须转 UNIX 秒（Lightweight Charts 日内轴要求），且图表实例在 日线类↔日内类 切换时需重建
+
+### v1.1.0-a 修复（2026-08-22）
+- **TDZ 崩溃修复**：`load` 的依赖数组引用了在其后定义的 `maybeAlert`，首帧渲染即抛
+  `Cannot access 'maybeAlert' before initialization`，整个 `shell.overlay` 槽位崩溃导致插件 UI 消失。
+  已把 `maybeAlert` 移到 `load` 之前。教训：**useCallback 依赖数组里引用的回调必须先定义**；
+  客户端插件改完必须用无头浏览器实测渲染，仅 `node --check` 抓不住运行时错误。
+
+## 改了什么（v1.0.x 性能优化）
+
+### Host 端（index.js）
+
+| # | 优化 | 效果 |
+|---|---|---|
+| 1 | `/quotes` 改用 `qt.gtimg.cn/q=` 批量快照接口（GBK 解码），N 只股票从 N 个上游请求合并为 ⌈N/50⌉ 个 | 展开盯盘 10s 一轮的请求量从 N → 1~2 |
+| 2 | 分时 JSON 缓存（30s TTL）：列表迷你折线与详情分时共享 | 单只股票分时上游请求 ≤1 次/30s |
+| 3 | K 线缓存（30s TTL） | 详情页 K 线轮询不再每次打上游 |
+| 4 | `~/.stocking/settings.json` 按 mtime 缓存 | 每 10s 轮询不再重读+重析配置文件 |
+| 5 | 上游 fetch 统一带 `User-Agent`/`Referer` 头 | 降低被腾讯接口限流的概率 |
+| 6 | GBK 解码器不可用时自动回退旧的单只 minute/query 路径 | 兼容性兜底 |
+
+批量快照字段序与原 minute/query 的 qt 数组完全一致（[1]名 [3]价 [6]量 [31]涨跌 [32]% [33]高 [34]低 [37]额万），HTTP 响应结构未变，客户端无需适配。
+
+### Client 端（client.js）
+
+| # | 优化 | 效果 |
+|---|---|---|
+| 1 | 交易时段感知轮询（北京时间 UTC+8 固定偏移换算，不依赖机器时区）：9:15–11:35 / 13:00–15:05 活跃 | 展开 10s→休市 60s、折叠 30s→休市 120s，夜间/周末流量降 ~80%+ |
+| 2 | 页面隐藏（`document.hidden`）暂停轮询，回前台立即补刷 | 后台标签页零轮询 |
+| 3 | `load()` 在途防重叠 | 网络慢/超时时轮询不再堆积 |
+| 4 | 详情页分频：分时 10s、K 线 60s（K 线盘中变化慢） | 减一半详情请求 |
+| 5 | 倒计时显示与真实节奏同步（随 10/30/60/120s 变化） | UI 如实反映刷新间隔 |
+
+功能、UI、交互、localStorage 键均未改动。
+
+## 实测（2026-08-22 冒烟测试）
+
+- `/quotes` 4 只股票含分时：首次 313ms，缓存命中后 26ms
+- `/kline` 日线 160 根：首次 54ms，缓存命中后 0ms
+- `/minute`、`/stocks` 正常
+
+## 部署到运行中的 profile
+
+```bash
+DEST=~/.dsh/profiles/web/node_modules/dsh-stock-watch
+rm -f "$DEST/index.js" "$DEST/client.js"   # 先 rm 断开 pnpm 硬链接，避免写穿 store
+cp index.js client.js "$DEST/"
+```
+
+生效需重启 dsh-web（插件是 profile 静态 bundle，不支持热载）：
+`sudo systemctl restart dsh-web`
+
+## 测试
+
+```bash
+node --check index.js && node --check client.js
+node tests/smoke.mjs   # stub ctx + 真实上游网络冒烟测试
+```
+
+## v1.1.2 拖拽缩放导致 K 线图消失的修复
+
+**症状**：右下角拉伸面板后 K 线图消失，且刷新不恢复（尺寸已持久化）。
+
+**根因（两个叠加）**：
+1. 首次拉伸使 `size` 非空 → 详情图表切换为 fill 模式 → 图表 mount effect 重跑重建实例，
+   但数据 effect 的 deps（candles 数组引用）未变而跳过 → 新实例从未 `setData` → 空白画布。
+2. 图表盒 `flex:1 1 0 + minHeight:0` 在小面板下弹性空间归零（真·0 高度），且
+   `.sk-detail-body` 为 `flex:0 1 auto` 不随面板生长，放大后也无法恢复。
+
+**修复**：
+- `chartEpoch` 机制：图表重建时强制数据 effect 重灌数据（LwcChart/MinuteChart）
+- `.sk-detail-body` 改 `flex:1 1 auto`；图表盒兜底 `minHeight:160`
+- 弃用 lwc `autoSize`（4.2.3 拖拽连发 resize 有几何更新但不重绘的跳帧），改显式尺寸 +
+  ResizeObserver + 拖拽事件直驱的 `chartResizeHooks` 三重保障
+- 港股/美股代码不再被错误拼成 shhk…/shus…（normalizeApiCode 市场前缀透传，北交所顺带支持）——此项 host 半需重启生效
+
+验证：无头浏览器拖拽矩阵（缩/放/再缩/分时/刷新恢复）像素级墨水率 5/5 通过。

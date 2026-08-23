@@ -1,0 +1,2248 @@
+/**
+ * dsh-stock-watch — 浏览器端（client.js）
+ *
+ * dsh 客户端插件：在 shell.overlay 槽位注册右上角可折叠盯盘弹窗。
+ * 数据来自 node 端插件注册的 /dsh-stock-watch/* 路由（同源 fetch）。
+ * 自选股配置（分组/代码/买卖目标价）以服务器 ~/.stocking/settings.json 为唯一数据源（多端一致），
+ * localStorage 仅作离线缓存；服务器无配置时首次自动反向迁移本地配置。
+ * 图表：TradingView Lightweight Charts（CDN 懒加载，失败降级自绘 SVG）。
+ * 配色沿用 A 股红涨绿跌惯例（涨 #ff1493 / 跌 #00ff41）。
+ */
+window.__ModuleLoader__.load({
+  id: "dsh-stock-watch",
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+    let react = require("react");
+    const { useState, useEffect, useCallback, useRef } = react;
+
+    // ------------------------------------------------------------------ CSS（墨金行情终端主题）
+    const styleTag = document.createElement("style");
+    styleTag.textContent = `
+/* ================= 变量：暗色（默认） ================= */
+.sk-theme-dark{
+  --sk-bg:rgba(9,14,23,.97);--sk-panel-bg:rgba(9,14,23,.97);--sk-pill-bg:rgba(11,17,28,.93);
+  --sk-border:rgba(151,168,196,.22);--sk-border-soft:rgba(151,168,196,.10);
+  --sk-text:#e9eef6;--sk-dim:#9aa8bd;--sk-muted:#66748c;--sk-muted-strong:#46536b;
+  --sk-hover:rgba(159,178,207,.07);
+  --sk-accent:#f0b429;--sk-accent-soft:rgba(240,180,41,.13);--sk-accent-border:rgba(240,180,41,.45);
+  --sk-up:#ff4560;--sk-up-soft:rgba(255,69,96,.15);--sk-down:#00c883;--sk-down-soft:rgba(0,200,131,.14);
+  --sk-cyan:var(--sk-accent);--sk-cyan-soft:var(--sk-accent-soft);--sk-cyan-border:var(--sk-accent-border);
+  --sk-shadow:0 12px 44px rgba(0,0,0,.55),0 2px 10px rgba(0,0,0,.38);
+  --sk-inset:inset 0 1px 0 rgba(255,255,255,.05);
+}
+/* ================= 变量：浅色 ================= */
+.sk-theme-light{
+  --sk-bg:rgba(251,252,254,.98);--sk-panel-bg:rgba(251,252,254,.98);--sk-pill-bg:rgba(252,253,255,.96);
+  --sk-border:rgba(23,32,46,.17);--sk-border-soft:rgba(23,32,46,.07);
+  --sk-text:#182130;--sk-dim:#55667e;--sk-muted:#7d8ba0;--sk-muted-strong:#aeb9c9;
+  --sk-hover:rgba(24,33,48,.055);
+  --sk-accent:#a8730b;--sk-accent-soft:rgba(190,132,18,.12);--sk-accent-border:rgba(190,132,18,.5);
+  --sk-up:#d9213f;--sk-up-soft:rgba(217,33,63,.10);--sk-down:#00895c;--sk-down-soft:rgba(0,137,92,.12);
+  --sk-cyan:var(--sk-accent);--sk-cyan-soft:var(--sk-accent-soft);--sk-cyan-border:var(--sk-accent-border);
+  --sk-shadow:0 14px 44px rgba(23,32,46,.16),0 2px 8px rgba(23,32,46,.08);
+  --sk-inset:inset 0 1px 0 rgba(255,255,255,.65);
+}
+/* ================= 胶囊（折叠态） ================= */
+.sk-pill{position:fixed;top:14px;right:16px;z-index:9999;display:flex;align-items:center;gap:9px;padding:7px 13px;border-radius:999px;background:var(--sk-pill-bg);border:1px solid var(--sk-border);box-shadow:var(--sk-shadow),var(--sk-inset);backdrop-filter:blur(10px);color:var(--sk-text);cursor:pointer;cursor:grab;user-select:none;font:600 12px/1.4 ui-monospace,"JetBrains Mono","Cascadia Code","SF Mono",Menlo,Consolas,"PingFang SC","Microsoft YaHei",monospace;font-variant-numeric:tabular-nums;pointer-events:auto;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.sk-pill:hover{border-color:var(--sk-accent-border);transform:translateY(-1px)}
+.sk-pill:active{cursor:grabbing;transform:translateY(0)}
+.sk-pill-title{font-weight:800;letter-spacing:.02em;color:var(--sk-accent);white-space:nowrap}
+.sk-pill-summary{display:inline-flex;align-items:center;gap:7px;font-weight:700}
+.sk-meter{width:30px;height:4px;border-radius:2px;overflow:hidden;display:inline-flex;background:var(--sk-muted-strong)}
+.sk-meter i{display:block;height:100%}
+.sk-meter .sk-meter-up{background:var(--sk-up)}
+.sk-meter .sk-meter-down{background:var(--sk-down);flex:1}
+.sk-pill-count{font-size:11px;white-space:nowrap}
+.sk-pill-loading{color:var(--sk-muted)}
+/* 贴边吸附：半球 */
+.sk-pill.sk-dock{box-sizing:border-box;width:52px;height:44px;flex-direction:column;gap:1px;padding:3px 4px;justify-content:center;text-align:center}
+.sk-dock-left{border-radius:0 22px 22px 0}
+.sk-dock-right{border-radius:22px 0 0 22px}
+.sk-dock-top{border-radius:0 0 26px 26px}
+.sk-dock-bottom{border-radius:26px 26px 0 0}
+.sk-dock-body{display:flex;flex-direction:column;align-items:center;gap:0;line-height:1.05}
+.sk-dock-count{font-size:10px;font-weight:700;white-space:nowrap}
+/* ================= 扇形菜单 ================= */
+.sk-fan{position:fixed;inset:0;z-index:9998;pointer-events:none;visibility:hidden}
+.sk-fan-item{position:absolute;left:0;top:0;display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:999px;background:var(--sk-pill-bg);border:1px solid var(--sk-accent-border);color:var(--sk-text);font:600 11px/1.3 ui-monospace,"JetBrains Mono",Menlo,Consolas,"PingFang SC","Microsoft YaHei",monospace;cursor:pointer;box-shadow:var(--sk-shadow),var(--sk-inset);backdrop-filter:blur(10px);pointer-events:auto;white-space:nowrap;transition:background-color .18s ease,border-color .18s ease,color .18s ease,filter .18s ease}
+.sk-fan-item:hover{background:var(--sk-accent-soft);border-color:var(--sk-accent);color:var(--sk-accent);filter:brightness(1.06)}
+.sk-fan-item:active{filter:brightness(.92)}
+.sk-fan-item:focus-visible{outline:2px solid var(--sk-accent);outline-offset:2px}
+.sk-fan-item-disabled,.sk-fan-item-disabled:hover{opacity:.4;border-color:var(--sk-border);color:var(--sk-muted);background:transparent;cursor:not-allowed;filter:none}
+.sk-fan-icon{font-size:13px}
+/* 折叠态 toast */
+.sk-toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:10000;background:var(--sk-pill-bg);border:1px solid var(--sk-border);border-left:2px solid var(--sk-accent);border-radius:9px;padding:6px 14px;font:600 11px/1.4 ui-monospace,Menlo,Consolas,"PingFang SC","Microsoft YaHei",monospace;box-shadow:var(--sk-shadow);backdrop-filter:blur(10px);pointer-events:none;white-space:nowrap}
+/* ================= 主面板 ================= */
+.sk-panel{position:fixed;top:14px;right:16px;z-index:9999;width:400px;max-height:78vh;display:flex;flex-direction:column;border-radius:14px;overflow:hidden;background:var(--sk-bg);border:1px solid var(--sk-border);box-shadow:var(--sk-shadow),var(--sk-inset);backdrop-filter:blur(12px);color:var(--sk-text);font:12px/1.5 ui-monospace,"JetBrains Mono","Cascadia Code","SF Mono",Menlo,Consolas,"PingFang SC","Microsoft YaHei",monospace;font-variant-numeric:tabular-nums;pointer-events:auto;animation:skPop .17s cubic-bezier(.2,.85,.3,1)}
+@keyframes skPop{from{opacity:0;transform:translateY(-7px) scale(.985)}to{opacity:1;transform:none}}
+.sk-panel button:focus-visible,.sk-pill:focus-visible{outline:2px solid var(--sk-accent);outline-offset:1px}
+/* 头部 + 市场情绪灯 */
+.sk-header{position:relative;display:flex;align-items:center;gap:8px;padding:9px 11px 10px;border-bottom:1px solid var(--sk-border-soft)}
+.sk-mood{position:absolute;left:0;right:0;bottom:-1px;height:2px;display:flex;pointer-events:none}
+.sk-mood i{display:block;height:100%}
+.sk-title{font-weight:800;letter-spacing:.03em;color:var(--sk-accent);white-space:nowrap}
+.sk-tabs{display:flex;gap:4px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+.sk-tabs::-webkit-scrollbar{display:none}
+.sk-tab{flex:none;padding:2px 9px;border-radius:999px;border:1px solid transparent;background:transparent;color:var(--sk-muted);cursor:pointer;font:inherit;white-space:nowrap;transition:color .15s ease,background-color .15s ease}
+.sk-tab:hover{color:var(--sk-text)}
+.sk-tab-active{background:var(--sk-accent-soft);color:var(--sk-accent);border-color:var(--sk-accent-border);font-weight:700}
+.sk-tab-wrap{display:flex;align-items:center;gap:2px;flex:none}
+.sk-tab-del{background:transparent;border:none;color:var(--sk-muted);cursor:pointer;font-size:10px;font-weight:700;line-height:1;padding:0 2px;opacity:0;pointer-events:none}
+.sk-tab-wrap:hover .sk-tab-del{opacity:1;pointer-events:auto}
+.sk-tab-del:hover{color:var(--sk-up)}
+.sk-del{background:transparent;border:none;color:var(--sk-muted);cursor:pointer;font-size:11px;padding:0 2px;width:18px;flex:none;border-radius:4px}
+.sk-del:hover{color:var(--sk-up);background:var(--sk-hover)}
+.sk-resize{position:absolute;width:14px;height:14px;z-index:6;opacity:.5}
+.sk-resize:hover{opacity:1}
+.sk-resize-br{bottom:0;right:0;cursor:nwse-resize;border-bottom-right-radius:10px;background:linear-gradient(315deg,transparent 62%,var(--sk-muted) 62%,var(--sk-muted) 75%,transparent 75%)}
+.sk-right{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}
+.sk-countdown{color:var(--sk-muted);white-space:nowrap;font-size:11px}
+.sk-icon{background:transparent;border:none;color:var(--sk-muted);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:6px;font-family:inherit;transition:color .15s ease,background-color .15s ease}
+.sk-icon:hover{color:var(--sk-accent);background:var(--sk-hover)}
+/* ================= 列表 ================= */
+.sk-rows{overflow-y:auto;padding:5px 7px 8px;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:var(--sk-border) transparent}
+.sk-rows::-webkit-scrollbar{width:8px}
+.sk-rows::-webkit-scrollbar-thumb{background:var(--sk-border);border-radius:4px}
+.sk-row{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:9px;border:1px solid transparent;cursor:pointer;transition:background-color .14s ease,border-color .14s ease}
+.sk-row:hover{background:var(--sk-hover);border-color:var(--sk-border-soft)}
+.sk-name{display:flex;flex-direction:column;flex:1 1 auto;min-width:88px}
+.sk-name-text{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sk-code{color:var(--sk-muted);font-size:10.5px;letter-spacing:.04em}
+.sk-spark{flex:none;display:block;opacity:.95}
+.sk-price{width:62px;text-align:right;font-weight:800;padding:0 3px;border-radius:5px}
+.sk-flash-up{animation:skFlashUp 1s ease-out}
+.sk-flash-down{animation:skFlashDown 1s ease-out}
+@keyframes skFlashUp{0%{background:var(--sk-up-soft);color:var(--sk-up)}70%{color:var(--sk-up)}100%{background:transparent}}
+@keyframes skFlashDown{0%{background:var(--sk-down-soft);color:var(--sk-down)}70%{color:var(--sk-down)}100%{background:transparent}}
+.sk-chg{width:60px;text-align:center;font-weight:800;border-radius:6px;padding:1px 3px}
+.sk-trigger{min-width:34px;text-align:center;border:1px solid;border-radius:999px;padding:0 6px;font-weight:700;font-size:11px}
+.sk-trigger-none{color:var(--sk-muted-strong);border-color:var(--sk-border)}
+.sk-empty{padding:18px 10px;text-align:center;color:var(--sk-muted)}
+.sk-footer{display:flex;justify-content:space-between;gap:8px;padding:6px 11px 7px;border-top:1px solid var(--sk-border-soft);color:var(--sk-muted);font-size:10.5px}
+.sk-foot-left{max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sk-foot-mid{white-space:nowrap}
+.sk-foot-right{max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* ================= 详情页 ================= */
+.sk-detail-header{display:flex;flex-direction:column;gap:7px;padding:9px 11px 10px;border-bottom:1px solid var(--sk-border-soft);user-select:none;-webkit-user-select:none}
+.sk-detail-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.sk-back{align-self:flex-start;background:transparent;border:1px solid var(--sk-border);color:var(--sk-dim);border-radius:7px;padding:2px 9px;cursor:pointer;font:inherit;transition:color .15s ease,border-color .15s ease}
+.sk-back:hover{color:var(--sk-text);border-color:var(--sk-accent-border)}
+.sk-analyze{background:var(--sk-accent-soft);border:1px solid var(--sk-accent-border);color:var(--sk-accent);border-radius:7px;padding:2px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:700;white-space:nowrap;transition:filter .15s ease}
+.sk-analyze:hover{filter:brightness(1.12)}
+.sk-analyze:disabled{opacity:.55;cursor:wait;filter:none}
+.sk-detail-info{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.sk-detail-name{font-weight:800;font-size:13px;letter-spacing:.01em}
+.sk-detail-price{font-weight:800;font-size:19px;padding:0 4px;border-radius:6px}
+.sk-detail-chg{font-size:12px;font-weight:800;border-radius:6px;padding:1px 6px}
+.sk-detail-trigger{font-size:11px;border:1px solid;border-radius:999px;padding:0 7px;font-weight:700}
+.sk-detail-targets{display:flex;gap:10px;flex-wrap:wrap}
+.sk-target{font-size:11px;white-space:nowrap}
+.sk-target-btn{background:transparent;border:1px dashed var(--sk-border);color:var(--sk-dim);border-radius:7px;padding:1px 9px;cursor:pointer;font:inherit;white-space:nowrap;transition:border-color .15s ease,color .15s ease}
+.sk-target-btn:hover{border-color:var(--sk-accent-border);color:var(--sk-text)}
+.sk-target-input{width:120px;background:var(--sk-hover);border:1px solid var(--sk-accent-border);color:var(--sk-text);border-radius:7px;padding:1px 6px;font:inherit;outline:none}
+.sk-flash{font-size:11px}
+.sk-periods{display:flex;gap:3px;flex-wrap:wrap}
+.sk-period{background:transparent;border:1px solid transparent;color:var(--sk-muted);border-radius:6px;padding:1px 8px;cursor:pointer;font:inherit;transition:color .14s ease,background-color .14s ease}
+.sk-period:hover{color:var(--sk-text)}
+.sk-period-active{color:var(--sk-accent);border-color:var(--sk-accent-border);background:var(--sk-accent-soft);font-weight:700}
+.sk-chart-box{width:100%;position:relative}
+.sk-candles{display:block;margin:0 auto}
+.sk-chart-empty{padding:30px 10px;text-align:center;color:var(--sk-muted)}
+.sk-detail-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 11px;border-top:1px solid var(--sk-border-soft);color:var(--sk-muted);font-size:10.5px}
+.sk-ma-row{display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap}
+.sk-ma-chips{display:inline-flex;gap:6px;flex-wrap:wrap}
+.sk-zoom{display:inline-flex;gap:4px;align-items:center}
+.sk-zoom-btn{background:transparent;border:1px solid var(--sk-border);color:var(--sk-dim);border-radius:6px;min-width:22px;height:20px;padding:0 6px;cursor:pointer;font:inherit;font-size:11px;line-height:1;white-space:nowrap;transition:color .14s ease,border-color .14s ease}
+.sk-zoom-btn:hover{border-color:var(--sk-accent-border);color:var(--sk-text)}
+.sk-sort-btn{white-space:nowrap;font-weight:700}
+.sk-ma-chip{display:inline-flex;align-items:center;gap:4px;background:transparent;border:1px solid var(--sk-border);color:var(--sk-dim);border-radius:999px;padding:1px 8px;cursor:pointer;font:inherit;font-size:11px;white-space:nowrap;transition:border-color .14s ease}
+.sk-ma-chip:hover{border-color:var(--sk-accent-border);color:var(--sk-text)}
+.sk-ma-chip-off{opacity:.35;text-decoration:line-through}
+.sk-ma-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+/* 详情滚动体 */
+.sk-detail-body{display:flex;flex-direction:column;overflow-y:auto;flex:1 1 auto;min-height:0;scrollbar-width:thin;scrollbar-color:var(--sk-border) transparent}
+.sk-detail-body::-webkit-scrollbar{width:8px}
+.sk-detail-body::-webkit-scrollbar-thumb{background:var(--sk-border);border-radius:4px}
+/* 指标网格（卡片化：标签上、数值下） */
+.sk-stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:8px 10px;border-top:1px solid var(--sk-border-soft)}
+.sk-stat{display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-width:0;color:var(--sk-muted);background:var(--sk-hover);border-radius:8px;padding:3px 7px;line-height:1.3}
+.sk-stat span:first-child{font-size:9.5px;letter-spacing:.03em}
+.sk-stat b{font-weight:700;font-size:11px;color:var(--sk-text);white-space:nowrap;align-self:flex-end}
+/* 五档盘口 */
+.sk-ob{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;padding:6px 10px 9px;border-top:1px solid var(--sk-border-soft);font-size:10.5px}
+.sk-ob-col{display:flex;flex-direction:column;gap:1px;min-width:0}
+.sk-ob-head{color:var(--sk-muted);display:flex;justify-content:space-between;padding:0 2px 3px;letter-spacing:.04em}
+.sk-ob-row{position:relative;display:flex;justify-content:space-between;gap:6px;padding:0 3px;border-radius:4px;overflow:hidden;line-height:1.55}
+.sk-ob-bar{position:absolute;top:0;bottom:0;right:0;pointer-events:none}
+.sk-ob-col-ask .sk-ob-bar{background:linear-gradient(90deg,transparent,var(--sk-down-soft))}
+.sk-ob-col-bid .sk-ob-bar{background:linear-gradient(90deg,transparent,var(--sk-up-soft))}
+.sk-ob-tag{color:var(--sk-muted);flex:none;width:24px;position:relative}
+.sk-ob-price{font-weight:700;position:relative;flex:1;text-align:right;white-space:nowrap}
+.sk-ob-vol{color:var(--sk-dim);position:relative;flex:none;min-width:44px;text-align:right;white-space:nowrap}
+/* ================= 添加面板 ================= */
+.sk-add-mask{position:absolute;inset:0;z-index:20;background:var(--sk-panel-bg);display:flex;flex-direction:column;padding:10px}
+.sk-add-bar{display:flex;gap:8px;padding:7px 10px;border-top:1px solid var(--sk-border-soft)}
+.sk-add-bar-btn{flex:1;background:transparent;border:1px dashed var(--sk-border);color:var(--sk-dim);border-radius:9px;padding:6px;cursor:pointer;font:inherit;transition:border-color .15s ease,color .15s ease}
+.sk-add-bar-btn:hover{border-color:var(--sk-accent-border);color:var(--sk-text)}
+.sk-add-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.sk-add-title{font-weight:800;color:var(--sk-accent)}
+.sk-add-menu{display:flex;flex-direction:column;gap:6px}
+.sk-add-menu-item{background:var(--sk-hover);border:1px solid var(--sk-border);color:var(--sk-text);border-radius:9px;padding:8px 10px;cursor:pointer;font:inherit;text-align:left;transition:border-color .15s ease}
+.sk-add-menu-item:hover{border-color:var(--sk-accent-border)}
+.sk-add-stock{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0}
+.sk-add-input{background:var(--sk-hover);border:1px solid var(--sk-accent-border);color:var(--sk-text);border-radius:8px;padding:5px 8px;font:inherit;outline:none}
+.sk-add-input:focus{border-color:var(--sk-accent)}
+.sk-rename-input{width:120px;background:var(--sk-hover);border:1px solid var(--sk-accent-border);color:var(--sk-text);border-radius:6px;padding:1px 6px;font:inherit;outline:none}
+.sk-add-result-added .sk-add-result-name{color:var(--sk-muted)}
+.sk-add-result-badge{color:var(--sk-muted);font-size:10px;border:1px solid var(--sk-border);border-radius:999px;padding:0 5px;white-space:nowrap}
+.sk-add-results{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin}
+.sk-add-result{display:flex;gap:10px;align-items:center;background:transparent;border:none;color:var(--sk-text);border-radius:7px;padding:4px 8px;cursor:pointer;font:inherit;text-align:left;transition:background-color .14s ease}
+.sk-add-result:hover{background:var(--sk-hover)}
+.sk-add-result-code{color:var(--sk-muted);font-size:11px;width:52px}
+.sk-add-result-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sk-add-empty{color:var(--sk-muted);text-align:center;padding:14px 0;font-size:11px}
+.sk-add-group{display:flex;flex-direction:column;gap:8px}
+.sk-add-confirm{background:var(--sk-accent-soft);border:1px solid var(--sk-accent-border);color:var(--sk-accent);border-radius:7px;padding:5px 10px;cursor:pointer;font:inherit;font-weight:700}
+/* 动效偏好 */
+@media (prefers-reduced-motion: reduce){
+  .sk-panel,.sk-flash-up,.sk-flash-down{animation:none!important}
+  .sk-pill,.sk-row,.sk-tab,.sk-icon{transition:none!important}
+}
+`;
+    document.head.appendChild(styleTag);
+
+    // ------------------------------------------------------------------ 常量
+    const UP = "#ff4560";
+    const DOWN = "#00c883";
+    const FLAT = "#7d8ba0";
+    const YELLOW = "#ffcc00";
+    const AMBER = "#f0b429";
+    const STORAGE_KEY = "stocking.config.v1";
+    const BASE = "/dsh-stock-watch";
+    const DEFAULT_GROUPS = [
+      { name: "分组1", symbols: [{ code: "sh000001" }, { code: "sz399300" }, { code: "sh601899" }] },
+      { name: "分组2", symbols: [] },
+    ];
+    const POS_KEY = "stocking.pos.v1";
+    const SIZE_KEY = "stocking.size.v1";
+    // 内置提示词（保持不变，规范原文；{name}/{code} 为占位符）。
+    // 实际发送使用简短消息「分析{name}（code）」；技能调用指令由 host 端注入的条件式系统提示保证。
+    const BUILTIN_ANALYZE_PROMPT = "使用技能 investment-research 分析下{name}（{code}）这家公司，再使用技能 frontend-design 生成一个网站";
+    // 图表尺寸同步钩子：面板拖拽/窗口缩放后由事件直接驱动图表重测，
+    // 不依赖 ResizeObserver（拖拽连发场景下观察时机不可靠）
+    const chartResizeHooks = new Set();
+    const notifyChartResize = () => { for (const fn of chartResizeHooks) { try { fn(); } catch {} } };
+    const PANEL_MIN_W = 320;
+    const PANEL_MAX_W = 640;
+    const PANEL_MIN_H = 240;
+    const PANEL_MAX_H = 820;
+    const PILL_W = 132;
+    const DOCK_W = 52;   // 贴边半球尺寸：吸附到屏幕边缘后胶囊变为半球形（扁矮）
+    const DOCK_H = 44;
+    const SNAP_PX = 36;  // 拖拽吸附阈值：距边缘 SNAP_PX 内自动贴边
+    const PANEL_W = 400;
+    const MA_PERIODS = [5, 10, 20, 60];
+    const MA_COLOR = { 10: "#ffcc00", 20: "#ff5cd2", 60: "#00ff41" };
+    const MA_STORAGE_KEY = "stocking.ma.v1";
+    function maColor(p, dark) {
+      return p === 5 ? (dark ? "#e5e7eb" : "#374151") : MA_COLOR[p] || "#ffcc00";
+    }
+
+    // -------------------------------------------------------------- 轮询节奏
+    // 交易时段感知轮询：北京时间（UTC+8 固定偏移，不依赖机器时区）
+    // 9:15–11:35 / 13:00–15:05 视为活跃；午休/收盘后/周末行情不变，自动降频省流量。
+    const POLL_EXPANDED_FAST = 10000;   // 展开 + 交易时段：10s
+    const POLL_EXPANDED_SLOW = 60000;   // 展开 + 休市：60s
+    const POLL_COLLAPSED_FAST = 30000;  // 折叠 + 交易时段：30s
+    const POLL_COLLAPSED_SLOW = 120000; // 折叠 + 休市：120s
+    const POLL_DETAIL_MINUTE = 10000;   // 详情分时：10s
+    const POLL_DETAIL_KLINE = 60000;    // 详情日/周/月 K：60s（盘中变化慢，host 另有 30s 缓存）
+    const POLL_DETAIL_MK = 30000;       // 详情分钟级 K（5/15/30/60 分）：30s
+    const POLL_ALERT_BG = 120000;       // 页面隐藏但开着到价提醒时的保活轮询
+    // K 线周期（自选股风格：分钟级 + 日/周/月）
+    const PERIOD_META = [
+      { id: "minute", label: "分时" },
+      { id: "m5", label: "5分" },
+      { id: "m15", label: "15分" },
+      { id: "m30", label: "30分" },
+      { id: "m60", label: "60分" },
+      { id: "day", label: "日K" },
+      { id: "week", label: "周K" },
+      { id: "month", label: "月K" },
+    ];
+    function periodLabel(p) {
+      const m = PERIOD_META.find((x) => x.id === p);
+      return m ? m.label : p;
+    }
+    function isIntradayPeriod(p) {
+      return p === "m5" || p === "m15" || p === "m30" || p === "m60";
+    }
+    // 列表排序模式（自选股风格：按涨跌幅/现价排序）
+    const SORT_MODES = [
+      { id: "default", label: "默认" },
+      { id: "chgDesc", label: "涨幅↓" },
+      { id: "chgAsc", label: "涨幅↑" },
+      { id: "priceDesc", label: "现价↓" },
+    ];
+    // 到价提醒（参考腾讯自选股「股价提醒」）：目标价触发时弹系统通知
+    const ALERT_KEY = "stocking.alert.v1";
+    function beijingWallClock() {
+      return new Date(Date.now() + (480 + new Date().getTimezoneOffset()) * 60000);
+    }
+    function marketActive() {
+      const b = beijingWallClock();
+      const day = b.getDay();
+      if (day === 0 || day === 6) return false;
+      const m = b.getHours() * 60 + b.getMinutes();
+      return (m >= 555 && m <= 695) || (m >= 780 && m <= 905);
+    }
+
+    // ------------------------------------------------------------------ 工具
+    async function api(path, params) {
+      const qs = new URLSearchParams();
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          if (v === undefined || v === null) continue;
+          qs.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
+        }
+      }
+      const q = qs.toString();
+      const res = await fetch(BASE + path + (q ? "?" + q : ""), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }
+
+    // 分组配置上传到服务器（POST /config）；服务器是唯一数据源，localStorage 只是缓存
+    async function postConfig(groups) {
+      const res = await fetch(BASE + "/config", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ groups }),
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }
+
+    function formatPrice(p) {
+      const n = Number(p);
+      if (!Number.isFinite(n)) return "--";
+      return n >= 100 ? n.toFixed(2) : n.toFixed(3);
+    }
+
+    function triggerMeta(t) {
+      if (t === "sell") return { t: "卖出", c: UP };
+      if (t === "buy") return { t: "买入", c: DOWN };
+      if (t === "wait") return { t: "等待", c: YELLOW };
+      return null;
+    }
+
+    function computeTrigger(price, buyPrice, sellPrice) {
+      if (buyPrice === undefined && sellPrice === undefined) return "none";
+      if (sellPrice !== undefined && price >= sellPrice) return "sell";
+      if (buyPrice !== undefined && price <= buyPrice) return "buy";
+      return "wait";
+    }
+
+    // -------------------------------------------------------------- 到价提醒
+    function loadAlertCfg() {
+      try {
+        const raw = window.localStorage.getItem(ALERT_KEY);
+        if (raw) {
+          const p = JSON.parse(raw);
+          if (p && typeof p.enabled === "boolean") {
+            return { enabled: p.enabled, last: p.last && typeof p.last === "object" ? p.last : {} };
+          }
+        }
+      } catch { /* ignore */ }
+      return { enabled: false, last: {} };
+    }
+
+    function saveAlertCfg(cfg) {
+      try { window.localStorage.setItem(ALERT_KEY, JSON.stringify(cfg)); } catch { /* ignore */ }
+    }
+
+    function alertsSupported() {
+      return typeof window.Notification !== "undefined" && typeof Notification.requestPermission === "function";
+    }
+
+    /** 弹一条到价通知；tag 按代码+方向去重，12s 后自动关闭 */
+    function notifyPriceAlert(row, type) {
+      try {
+        if (!alertsSupported() || Notification.permission !== "granted") return;
+        const target = type === "buy" ? row.buyPrice : row.sellPrice;
+        const title = (type === "buy" ? "🟢 到买点：" : "🔴 到卖点：") + row.name;
+        const body = row.code + "  现价 " + formatPrice(row.price)
+          + (typeof target === "number" ? "（目标 " + formatPrice(target) + "）" : "");
+        const n = new Notification(title, { body, tag: "sk-alert-" + row.code + "-" + type });
+        setTimeout(() => { try { n.close(); } catch { /* ignore */ } }, 12000);
+      } catch { /* ignore */ }
+    }
+
+    // ----------------------------------------------- TradingView Lightweight Charts 懒加载
+    let lwcPromise = null;
+    function loadLightweightCharts() {
+      if (lwcPromise) return lwcPromise;
+      const p = new Promise((resolve) => {
+        let settled = false;
+        const finish = (lib) => {
+          if (settled) return;
+          settled = true;
+          if (!lib) lwcPromise = null;
+          resolve(lib);
+        };
+        try {
+          const existing = window.LightweightCharts;
+          if (existing) { finish(existing); return; }
+          const sources = [
+            "https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js",
+            "https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js",
+          ];
+          let idx = 0;
+          const inject = () => {
+            if (idx >= sources.length) { finish(null); return; }
+            const s = document.createElement("script");
+            s.src = sources[idx];
+            s.async = true;
+            s.onload = () => {
+              if (window.LightweightCharts) finish(window.LightweightCharts);
+              else { idx += 1; inject(); }
+            };
+            s.onerror = () => { idx += 1; inject(); };
+            document.head.appendChild(s);
+          };
+          inject();
+          setTimeout(() => finish(null), 9000);
+        } catch {
+          finish(null);
+        }
+      });
+      lwcPromise = p;
+      return p;
+    }
+
+    // ----------------------------------------------- GSAP 懒加载（胶囊扇形菜单动画）
+    let gsapPromise = null;
+    function loadGsap() {
+      if (gsapPromise) return gsapPromise;
+      const p = new Promise((resolve) => {
+        let settled = false;
+        const finish = (lib) => {
+          if (settled) return;
+          settled = true;
+          if (!lib) gsapPromise = null;
+          resolve(lib);
+        };
+        try {
+          const existing = window.gsap;
+          if (existing) { finish(existing); return; }
+          const sources = [
+            "https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js",
+            "https://unpkg.com/gsap@3.12.5/dist/gsap.min.js",
+          ];
+          let idx = 0;
+          const inject = () => {
+            if (idx >= sources.length) { finish(null); return; }
+            const s = document.createElement("script");
+            s.src = sources[idx];
+            s.async = true;
+            s.onload = () => {
+              if (window.gsap) finish(window.gsap);
+              else { idx += 1; inject(); }
+            };
+            s.onerror = () => { idx += 1; inject(); };
+            document.head.appendChild(s);
+          };
+          inject();
+          setTimeout(() => finish(null), 9000);
+        } catch {
+          finish(null);
+        }
+      });
+      gsapPromise = p;
+      return p;
+    }
+
+    // ----------------------------------------------- 扇形菜单几何
+    // 按胶囊中心相对屏幕的位置选择展开象限（优先空间大的一侧），半径按可用空间钳制，保证不越出屏幕。
+    // 角度 0°=右、90°=下（屏幕坐标系 y 向下）；3 个选项围绕象限对角方向 ±35° 展开。
+    function fanGeometry(pos, pillW, pillH) {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const cx = pos ? pos.x + pillW / 2 : vw - PILL_W / 2 - 16;
+      const cy = pos ? pos.y + pillH / 2 : 14 + pillH / 2;
+      const left = cx;
+      const right = vw - cx;
+      const top = cy;
+      const bottom = vh - cy;
+      const hDir = right >= left ? 1 : -1; // 1=向右展开，-1=向左
+      const vDir = bottom >= top ? 1 : -1; // 1=向下展开，-1=向上
+      const hSpace = hDir === 1 ? right : left;
+      const vSpace = vDir === 1 ? bottom : top;
+      let base = 0;
+      if (hDir === 1 && vDir === 1) base = 45;
+      else if (hDir === 1 && vDir === -1) base = -45;
+      else if (hDir === -1 && vDir === 1) base = 135;
+      else base = 225;
+      const R = Math.max(44, Math.min(128, hSpace - 40, vSpace - 40));
+      // 选项估算半宽/半高，用于逐项屏幕边界钳制（贴边时接近水平/垂直方向的选项不会推出屏外）
+      const HALF_W = 48;
+      const HALF_H = 18;
+      const EDGE = 6;
+      return {
+        cx,
+        cy,
+        hDir,
+        vDir,
+        items: [base - 35, base, base + 35].map((a) => {
+          const rad = (a * Math.PI) / 180;
+          let x = cx + Math.cos(rad) * R;
+          let y = cy + Math.sin(rad) * R;
+          x = Math.min(vw - HALF_W - EDGE, Math.max(HALF_W + EDGE, x));
+          y = Math.min(vh - HALF_H - EDGE, Math.max(HALF_H + EDGE, y));
+          return { dx: x - cx, dy: y - cy, angle: a };
+        }),
+      };
+    }
+
+    // -------------------------------------------------------------- 分时迷你折线（列表行）
+    function Sparkline(props) {
+      const prices = props.prices;
+      const color = props.color;
+      const width = 72;
+      const height = 20;
+      if (!Array.isArray(prices) || prices.length < 2) {
+        return react.createElement("svg", { className: "sk-spark", width, height, viewBox: "0 0 " + width + " " + height });
+      }
+      const pts = prices.length > 60 ? prices.slice(prices.length - 60) : prices;
+      let min = Infinity;
+      let max = -Infinity;
+      for (const p of pts) { if (p < min) min = p; if (p > max) max = p; }
+      const span = (max - min) || 1;
+      const coords = pts.map((p, i) => {
+        const x = (i / (pts.length - 1)) * (width - 2) + 1;
+        const y = height - 2 - ((p - min) / span) * (height - 4);
+        return x.toFixed(1) + "," + y.toFixed(1);
+      });
+      return react.createElement("svg", { className: "sk-spark", width, height, viewBox: "0 0 " + width + " " + height },
+        react.createElement("polyline", { points: coords.join(" "), fill: "none", stroke: color, strokeWidth: 1.4 }));
+    }
+
+    // -------------------------------------------------------------- K线 SVG 兜底
+    function SvgCandles(props) {
+      const candles = props.candles || [];
+      const width = props.width || 380;
+      const height = props.height || 228;
+      const fill = props.fill === true;
+      if (!Array.isArray(candles) || candles.length === 0) {
+        return react.createElement("div", { className: "sk-chart-empty" }, "暂无K线数据");
+      }
+      const pad = 6;
+      let min = Infinity;
+      let max = -Infinity;
+      for (const c of candles) {
+        if (c.low < min) min = c.low;
+        if (c.high > max) max = c.high;
+      }
+      const span = (max - min) || 1;
+      const innerH = height - pad * 2;
+      const yOf = (v) => pad + innerH - ((v - min) / span) * innerH;
+      const n = candles.length;
+      const step = (width - pad * 2) / n;
+      const bodyW = Math.max(2, step * 0.62);
+      const els = [];
+      for (let i = 0; i < n; i++) {
+        const c = candles[i];
+        const x = pad + step * i + step / 2;
+        const up = c.close >= c.open;
+        const color = up ? UP : DOWN;
+        const openY = yOf(c.open);
+        const closeY = yOf(c.close);
+        const top = Math.min(openY, closeY);
+        const bodyH = Math.max(1, Math.abs(closeY - openY));
+        els.push(react.createElement("line", { key: "w" + i, x1: x, y1: yOf(c.high), x2: x, y2: yOf(c.low), stroke: color, strokeWidth: 1 }));
+        els.push(react.createElement("rect", { key: "b" + i, x: x - bodyW / 2, y: top, width: bodyW, height: bodyH, fill: color }));
+      }
+      const svgEl = react.createElement("svg", { className: "sk-candles", width, height, viewBox: "0 0 " + width + " " + height, style: fill ? { width: "100%", height: "100%", display: "block" } : undefined }, els);
+      return fill
+        ? react.createElement("div", { style: { flex: "1 1 0", minHeight: 0, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" } }, svgEl)
+        : svgEl;
+    }
+
+    // ------------------------------------------------------ 分时时间轴：按 A 股交易时段（北京时间 UTC+8）标注
+    const SHANGHAI_OFFSET = 8 * 3600;
+    function beijingOf(ts) {
+      return new Date((Number(ts) + SHANGHAI_OFFSET) * 1000);
+    }
+    function fmtBeijingClock(ts) {
+      const d = beijingOf(ts);
+      return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0");
+    }
+    // lightweight-charts v4 tick/time formatter：无论浏览器时区，一律按北京时间显示
+    function beijingTickFormatter(time, tickMarkType) {
+      let ts;
+      if (typeof time === "object" && time !== null) {
+        ts = Date.UTC(time.year, (time.month || 1) - 1, time.day || 1) / 1000;
+      } else {
+        ts = Number(time);
+      }
+      const d = beijingOf(ts);
+      const isTime = tickMarkType >= 3 || tickMarkType === "Time" || tickMarkType === "TimeWithSeconds";
+      const clock = fmtBeijingClock(ts);
+      if (isTime) return clock;
+      return String(d.getUTCMonth() + 1) + "-" + String(d.getUTCDate()) + " " + clock;
+    }
+
+    // -------------------------------------------------------------- 分时 SVG 兜底
+    function SvgMinute(props) {
+      const points = props.points || [];
+      const prevClose = props.prevClose;
+      const width = props.width || 380;
+      const height = props.height || 228;
+      const dark = props.dark;
+      const fill = props.fill === true;
+      if (!Array.isArray(points) || points.length < 2) {
+        return react.createElement("div", { className: "sk-chart-empty" }, "暂无分时数据");
+      }
+      const pad = 8;
+      const all = points.map((pt) => pt.p).concat((typeof prevClose === "number" && Number.isFinite(prevClose)) ? [prevClose] : []);
+      let min = Infinity;
+      let max = -Infinity;
+      for (const p of all) { if (p < min) min = p; if (p > max) max = p; }
+      const span = (max - min) || 1;
+      const innerW = width - pad * 2;
+      const innerH = height - pad * 2;
+      const xOf = (i) => pad + (i / (points.length - 1)) * innerW;
+      const yOf = (v) => pad + innerH - ((v - min) / span) * innerH;
+      const pricePts = points.map((pt, i) => xOf(i).toFixed(1) + "," + yOf(pt.p).toFixed(1)).join(" ");
+      let cumV = 0;
+      let cumA = 0;
+      const avgPts = points.map((pt, i) => {
+        cumV += pt.v;
+        cumA += pt.p * pt.v;
+        const v = cumV > 0 ? cumA / cumV : pt.p;
+        return xOf(i).toFixed(1) + "," + yOf(v).toFixed(1);
+      }).join(" ");
+      const up = (typeof prevClose === "number" && Number.isFinite(prevClose) && prevClose > 0)
+        ? points[points.length - 1].p >= prevClose
+        : true;
+      const els = [];
+      els.push(react.createElement("polyline", { key: "price", points: pricePts, fill: "none", stroke: up ? UP : DOWN, strokeWidth: 1.6 }));
+      els.push(react.createElement("polyline", { key: "avg", points: avgPts, fill: "none", stroke: YELLOW, strokeWidth: 1 }));
+      if (typeof prevClose === "number" && Number.isFinite(prevClose) && prevClose > 0) {
+        const y = yOf(prevClose);
+        els.push(react.createElement("line", { key: "base", x1: pad, y1: y, x2: width - pad, y2: y, stroke: dark ? "rgba(255,255,255,0.45)" : "rgba(15,23,42,0.4)", strokeWidth: 1, strokeDasharray: "4 3" }));
+      }
+      // 交易时段标签（北京时间）：开盘 09:30 · 午后开盘 13:00 · 收盘 15:00
+      const labelFill = dark ? "rgba(255,255,255,0.5)" : "rgba(15,23,42,0.5)";
+      const secOfDay = (ts) => ((ts % 86400) + 86400) % 86400;
+      let gapIdx = -1;
+      for (let i = 1; i < points.length; i++) {
+        const step = secOfDay(points[i].t) - secOfDay(points[i - 1].t);
+        if (step > 1800) { gapIdx = i; break; }
+      }
+      const midIdx = gapIdx > 0 ? gapIdx : Math.floor(points.length / 2);
+      els.push(react.createElement("text", { key: "t0", x: 4, y: height - 6, fill: labelFill, fontSize: 9 }, fmtBeijingClock(points[0].t)));
+      els.push(react.createElement("text", { key: "t1", x: xOf(midIdx) - 14, y: height - 6, fill: labelFill, fontSize: 9 }, fmtBeijingClock(points[midIdx].t)));
+      els.push(react.createElement("text", { key: "t2", x: width - 34, y: height - 6, fill: labelFill, fontSize: 9 }, fmtBeijingClock(points[points.length - 1].t)));
+      const svgEl = react.createElement("svg", { className: "sk-candles", width, height, viewBox: "0 0 " + width + " " + height, style: fill ? { width: "100%", height: "100%", display: "block" } : undefined }, els);
+      return fill
+        ? react.createElement("div", { style: { flex: "1 1 0", minHeight: 0, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" } }, svgEl)
+        : svgEl;
+    }
+
+    // 简单移动平均：按收盘价计算，返回 [{time, value}]（前 period-1 根无值，线从有值处开始）
+    function computeMa(candles, period) {
+      const data = [];
+      let sum = 0;
+      for (let i = 0; i < candles.length; i++) {
+        sum += candles[i].close;
+        if (i >= period) sum -= candles[i - period].close;
+        if (i >= period - 1) {
+          data.push({ time: candles[i].time, value: sum / period });
+        }
+      }
+      return data;
+    }
+
+    // -------------------------------------------------------------- Lightweight Charts K线
+    function LwcChart(props) {
+      const lwc = props.lwc;
+      const candles = props.candles || [];
+      const height = props.height || 240;
+      const fitKey = props.fitKey || "";
+      const dark = props.dark;
+      const maVisible = props.maVisible || {};
+      const fill = props.fill === true;
+      // 日内分钟级 K 用 UNIX 秒时间轴（timeVisible 显示 HH:mm）；日线类用日期字符串。
+      // 时间类型不同不能在同一图表实例上切换 → intraday 变化时重建图表。
+      const intraday = props.intraday === true;
+      const chartApiRef = props.chartApiRef || null;
+      const boxRef = useRef(null);
+      const chartRef = useRef(null);
+      const seriesRef = useRef(null);
+      const volRef = useRef(null);
+      const maRefs = useRef([]);
+      const lastFitKey = useRef(null);
+      // 图表重建计数：mount effect 因 fill/dark 等重跑重建图表时，数据 effect 的
+      // deps（candles）未必变化——用 epoch 强制新实例重新灌入数据，否则画布空白
+      const [chartEpoch, setChartEpoch] = useState(0);
+      useEffect(() => {
+        if (!lwc || !boxRef.current) return undefined;
+        const el = boxRef.current;
+        const chart = lwc.createChart(el, {
+          // 不用 autoSize：4.2.3 在拖拽连发 resize 时存在「几何更新但不重绘」的跳帧，
+          // 统一显式尺寸，由下方 ResizeObserver 驱动 applyOptions 重绘
+          width: Math.max(80, el.clientWidth || 380),
+          height: Math.max(120, fill ? (el.clientHeight || 240) : height),
+          layout: { background: { type: "solid", color: "transparent" }, textColor: dark ? "#9ca3af" : "#6b7280", fontSize: 10 },
+          grid: { vertLines: { color: dark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.08)" }, horzLines: { color: dark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.08)" } },
+          rightPriceScale: { borderColor: dark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.14)" },
+          timeScale: { borderColor: dark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.14)", timeVisible: true, secondsVisible: false },
+          crosshair: {
+            mode: 0,
+            vertLine: { color: "rgba(240,180,41,0.45)", labelBackgroundColor: "#4a3608" },
+            horzLine: { color: "rgba(240,180,41,0.45)", labelBackgroundColor: "#4a3608" },
+          },
+        });
+        const series = chart.addCandlestickSeries({
+          upColor: UP,
+          downColor: DOWN,
+          borderUpColor: UP,
+          borderDownColor: DOWN,
+          wickUpColor: UP,
+          wickDownColor: DOWN,
+          priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+        });
+        const vol = chart.addHistogramSeries({
+          priceScaleId: "",
+          priceFormat: { type: "volume" },
+          lastValueVisible: false,
+          priceLineVisible: false,
+          scaleMargins: { top: 0.82, bottom: 0 },
+        });
+        // MA 均线（A 股配色：MA5 白、MA10 黄、MA20 紫、MA60 绿；MA5 随主题取可读灰色）
+        const MA_CONFIG = [
+          { period: 5, color: maColor(5, dark) },
+          { period: 10, color: maColor(10, dark) },
+          { period: 20, color: maColor(20, dark) },
+          { period: 60, color: maColor(60, dark) },
+        ];
+        maRefs.current = MA_CONFIG.map((cfg) => {
+          const s = chart.addLineSeries({
+            color: cfg.color,
+            lineWidth: 1,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            visible: !maVisible || maVisible[cfg.period] !== false,
+            priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+          });
+          return { period: cfg.period, series: s };
+        });
+        chartRef.current = chart;
+        seriesRef.current = series;
+        volRef.current = vol;
+        if (chartApiRef) chartApiRef.current = chart;
+        // 拖拽缩放面板时 autoSize 偶发跳帧（几何更新但不重绘）——自研 RO 兜底强制重绘
+        let ro = null;
+        if (typeof ResizeObserver === "function") {
+          let lastW = el.clientWidth;
+          ro = new ResizeObserver(() => {
+            const box = boxRef.current;
+            if (!box) return;
+            const w = box.clientWidth;
+            const h = box.clientHeight;
+            if (w > 0 && h > 0) {
+              try { chart.applyOptions({ width: w, height: h }); } catch {}
+              // 宽度变化会移动时间轴映射，重置视野避免 K 线滚出可视区
+              if (Math.abs(w - lastW) > 2) {
+                try { chart.timeScale().fitContent(); } catch {}
+                lastW = w;
+              }
+            }
+          });
+          ro.observe(el);
+        }
+        const syncChartSize = () => {
+          const box = boxRef.current;
+          if (!box) return;
+          const w = box.clientWidth;
+          const h = box.clientHeight;
+          if (w > 0 && h > 0) {
+            try { chart.applyOptions({ width: w, height: h }); } catch {}
+          }
+        };
+        chartResizeHooks.add(syncChartSize);
+        syncChartSize();
+        // 通知数据 effect：图表是新实例，必须重新 setData
+        setChartEpoch((e) => e + 1);
+        return () => {
+          if (ro) { try { ro.disconnect(); } catch {} }
+          chartResizeHooks.delete(syncChartSize);
+          chart.remove();
+          chartRef.current = null;
+          seriesRef.current = null;
+          volRef.current = null;
+          maRefs.current = [];
+          if (chartApiRef) chartApiRef.current = null;
+        };
+      }, [lwc, height, dark, fill, intraday]);
+      // MA 显隐切换：applyOptions({ visible })，无需重建图表
+      useEffect(() => {
+        for (const ma of maRefs.current) {
+          ma.series.applyOptions({ visible: !maVisible || maVisible[ma.period] !== false });
+        }
+      }, [maVisible]);
+      useEffect(() => {
+        const series = seriesRef.current;
+        const vol = volRef.current;
+        if (!series || !vol) return;
+        series.setData(candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
+        vol.setData(candles.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? "rgba(255,20,147,0.35)" : "rgba(0,255,65,0.35)" })));
+        for (const ma of maRefs.current || []) {
+          ma.series.setData(computeMa(candles, ma.period));
+        }
+        if (lastFitKey.current !== fitKey && chartRef.current) {
+          lastFitKey.current = fitKey;
+          chartRef.current.timeScale().fitContent();
+        }
+      }, [candles, lwc, fitKey, chartEpoch]);
+      return react.createElement("div", { ref: boxRef, className: "sk-chart-box", style: fill ? { width: "100%", flex: "1 1 0", minHeight: 160 } : { width: "100%", height } });
+    }
+
+    // -------------------------------------------------------------- Lightweight Charts 分时
+    function MinuteChart(props) {
+      const lwc = props.lwc;
+      const points = props.points || [];
+      const prevClose = props.prevClose;
+      const height = props.height || 240;
+      const dark = props.dark;
+      const fitKey = props.fitKey || "";
+      const fill = props.fill === true;
+      const boxRef = useRef(null);
+      const chartRef = useRef(null);
+      const lineRef = useRef(null);
+      const avgRef = useRef(null);
+      const baselineRef = useRef(null);
+      const lastFitKey = useRef(null);
+      const [chartEpoch, setChartEpoch] = useState(0);
+      useEffect(() => {
+        if (!lwc || !boxRef.current) return undefined;
+        const el = boxRef.current;
+        const chart = lwc.createChart(el, {
+          // 不用 autoSize：4.2.3 在拖拽连发 resize 时存在「几何更新但不重绘」的跳帧，
+          // 统一显式尺寸，由下方 ResizeObserver 驱动 applyOptions 重绘
+          width: Math.max(80, el.clientWidth || 380),
+          height: Math.max(120, fill ? (el.clientHeight || 240) : height),
+          layout: { background: { type: "solid", color: "transparent" }, textColor: dark ? "#9ca3af" : "#6b7280", fontSize: 10 },
+          grid: { vertLines: { color: dark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.08)" }, horzLines: { color: dark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.08)" } },
+          rightPriceScale: { borderColor: dark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.14)" },
+          timeScale: {
+            borderColor: dark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.14)",
+            timeVisible: true,
+            secondsVisible: false,
+            // v4 中 tickMarkFormatter 属于 timeScale 选项（localization 里只有 timeFormatter）
+            tickMarkFormatter: (time, tickMarkType) => beijingTickFormatter(time, tickMarkType),
+          },
+          crosshair: {
+            mode: 0,
+            vertLine: { color: "rgba(240,180,41,0.45)", labelBackgroundColor: "#4a3608" },
+            horzLine: { color: "rgba(240,180,41,0.45)", labelBackgroundColor: "#4a3608" },
+          },
+          localization: {
+            timeFormatter: (time) => beijingTickFormatter(time, 3),
+          },
+        });
+        const line = chart.addLineSeries({
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+        });
+        const avg = chart.addLineSeries({
+          color: YELLOW,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+        });
+        chartRef.current = chart;
+        lineRef.current = line;
+        avgRef.current = avg;
+        // 同 LwcChart：autoSize 拖拽跳帧兜底
+        let ro = null;
+        if (typeof ResizeObserver === "function") {
+          ro = new ResizeObserver(() => {
+            const box = boxRef.current;
+            if (!box) return;
+            const w = box.clientWidth;
+            const h = box.clientHeight;
+            if (w > 0 && h > 0) {
+              try { chart.applyOptions({ width: w, height: h }); } catch {}
+            }
+          });
+          ro.observe(el);
+        }
+        const syncChartSize = () => {
+          const box = boxRef.current;
+          if (!box) return;
+          const w = box.clientWidth;
+          const h = box.clientHeight;
+          if (w > 0 && h > 0) {
+            try { chart.applyOptions({ width: w, height: h }); } catch {}
+          }
+        };
+        chartResizeHooks.add(syncChartSize);
+        syncChartSize();
+        setChartEpoch((e) => e + 1);
+        return () => {
+          if (ro) { try { ro.disconnect(); } catch {} }
+          chartResizeHooks.delete(syncChartSize);
+          chart.remove();
+          chartRef.current = null;
+          lineRef.current = null;
+          avgRef.current = null;
+          baselineRef.current = null;
+        };
+      }, [lwc, height, dark, fill]);
+      useEffect(() => {
+        const line = lineRef.current;
+        const avg = avgRef.current;
+        if (!line || !avg) return;
+        if (!Array.isArray(points) || points.length === 0) {
+          line.setData([]);
+          avg.setData([]);
+          return;
+        }
+        line.setData(points.map((pt) => ({ time: pt.t, value: pt.p })));
+        let cumV = 0;
+        let cumA = 0;
+        avg.setData(points.map((pt) => {
+          cumV += pt.v;
+          cumA += pt.p * pt.v;
+          return { time: pt.t, value: cumV > 0 ? cumA / cumV : pt.p };
+        }));
+        const lastP = points[points.length - 1].p;
+        const up = (typeof prevClose === "number" && Number.isFinite(prevClose) && prevClose > 0)
+          ? lastP >= prevClose
+          : lastP >= points[0].p;
+        line.applyOptions({ color: up ? UP : DOWN });
+        if (lastFitKey.current !== fitKey && chartRef.current) {
+          lastFitKey.current = fitKey;
+          chartRef.current.timeScale().fitContent();
+        }
+      }, [points, prevClose, lwc, fitKey, chartEpoch]);
+      useEffect(() => {
+        const line = lineRef.current;
+        if (!line) return;
+        if (baselineRef.current) {
+          try { line.removePriceLine(baselineRef.current); } catch { /* ignore */ }
+          baselineRef.current = null;
+        }
+        if (typeof prevClose === "number" && Number.isFinite(prevClose) && prevClose > 0) {
+          try {
+            baselineRef.current = line.createPriceLine({
+              price: prevClose,
+              color: dark ? "rgba(255,255,255,0.45)" : "rgba(15,23,42,0.4)",
+              lineStyle: 2,
+              lineWidth: 1,
+              axisLabelVisible: true,
+              title: "昨收",
+            });
+          } catch { /* ignore */ }
+        }
+      }, [prevClose, lwc, dark]);
+      return react.createElement("div", { ref: boxRef, className: "sk-chart-box", style: fill ? { width: "100%", flex: "1 1 0", minHeight: 160 } : { width: "100%", height } });
+    }
+
+    // ----------------------------------------------- 指标网格（自选股风格详情摘要）
+    function StatGrid(props) {
+      const row = props.row || {};
+      const price = (v) => (typeof v === "number" && Number.isFinite(v) ? formatPrice(v) : null);
+      const items = [
+        ["今开", price(row.open)],
+        ["昨收", price(row.prevClose)],
+        ["最高", price(row.high)],
+        ["最低", price(row.low)],
+        ["换手", typeof row.turnoverRate === "number" ? row.turnoverRate.toFixed(2) + "%" : null],
+        ["量比", typeof row.volumeRatio === "number" ? row.volumeRatio.toFixed(2) : null],
+        ["振幅", typeof row.amplitude === "number" ? row.amplitude.toFixed(2) + "%" : null],
+        ["总额", typeof row.amount === "number" && row.amount > 0 ? (row.amount / 1e8).toFixed(2) + "亿" : null],
+        ["PE(TTM)", typeof row.peRatio === "number" ? row.peRatio.toFixed(2) : null],
+        ["PB", typeof row.pbRatio === "number" ? row.pbRatio.toFixed(2) : null],
+        ["流通值", typeof row.floatMarketCap === "number" ? row.floatMarketCap.toFixed(0) + "亿" : null],
+        ["总值", typeof row.totalMarketCap === "number" ? row.totalMarketCap.toFixed(0) + "亿" : null],
+        ["涨停", price(row.limitUp)],
+        ["跌停", price(row.limitDown)],
+      ];
+      const cells = [];
+      for (const [label, value] of items) {
+        if (value === null || value === undefined) continue;
+        cells.push(react.createElement("span", { key: label, className: "sk-stat" },
+          react.createElement("span", null, label),
+          react.createElement("b", null, value)));
+      }
+      if (cells.length === 0) return null;
+      return react.createElement("div", { className: "sk-stat-grid" }, cells);
+    }
+
+    // ----------------------------------------------- 五档盘口（左卖右买，量条按档内最大量归一）
+    function OrderBook(props) {
+      const row = props.row || {};
+      const asks = Array.isArray(row.asks) ? row.asks : [];
+      const bids = Array.isArray(row.bids) ? row.bids : [];
+      if (asks.length === 0 && bids.length === 0) return null;
+      const prev = typeof row.prevClose === "number" && row.prevClose > 0 ? row.prevClose : null;
+      let maxVol = 1;
+      for (const lv of asks) if (lv.v > maxVol) maxVol = lv.v;
+      for (const lv of bids) if (lv.v > maxVol) maxVol = lv.v;
+      const priceColor = (p) => (prev ? (p >= prev ? UP : DOWN) : "var(--sk-text)");
+      const col = (levels, side) => {
+        // 卖盘列自上而下 卖5→卖1（asks 原序为 卖1→卖5，需倒转）；买盘列 买1→买5
+        const list = side === "ask" ? levels.slice().reverse() : levels;
+        const rows = list.map((lv, i) => {
+          const levelNo = side === "ask" ? 5 - i : i + 1;
+          const w = Math.max(4, Math.round((lv.v / maxVol) * 100));
+          return react.createElement("div", { key: side + levelNo, className: "sk-ob-row" },
+            react.createElement("span", { className: "sk-ob-bar", style: { width: w + "%" } }),
+            react.createElement("span", { className: "sk-ob-tag" }, (side === "ask" ? "卖" : "买") + levelNo),
+            react.createElement("span", { className: "sk-ob-price", style: { color: priceColor(lv.p) } }, formatPrice(lv.p)),
+            react.createElement("span", { className: "sk-ob-vol" }, lv.v >= 10000 ? (lv.v / 10000).toFixed(1) + "万" : String(lv.v)));
+        });
+        return react.createElement("div", { className: "sk-ob-col sk-ob-col-" + side },
+          react.createElement("span", { className: "sk-ob-head" },
+            react.createElement("span", null, side === "ask" ? "卖盘" : "买盘"),
+            react.createElement("span", null, "价 / 量(手)")),
+          rows);
+      };
+      return react.createElement("div", { className: "sk-ob" },
+        asks.length > 0 ? col(asks, "ask") : null,
+        bids.length > 0 ? col(bids, "bid") : null);
+    }
+
+    // -------------------------------------------------------------- 主面板
+    function WatchPanel(props) {
+      // 槽位标准 props：useSessions / useWorkspaces 是 selector hook，传恒等选择器取整个快照
+      // （current = 当前打开的会话 id；workspaces.items 用于让新会话沿用当前工作区）
+      const sessions = (props && props.useSessions) ? props.useSessions((s) => s) : null;
+      const workspaces = (props && props.useWorkspaces) ? props.useWorkspaces((s) => s) : null;
+      const [expanded, setExpanded] = useState(false);
+      const [groupIndex, setGroupIndex] = useState(0);
+      const [view, setView] = useState(null);
+      const [period, setPeriod] = useState("minute");
+      const [theme, setTheme] = useState("dark");
+      const [groupsCfg, setGroupsCfg] = useState(null);
+      const [data, setData] = useState(null);
+      const [kline, setKline] = useState(null);
+      const [minute, setMinute] = useState(null);
+      const [lwc, setLwc] = useState(null);
+      const [error, setError] = useState(null);
+      const [countdown, setCountdown] = useState(10);
+      const [targetEdit, setTargetEdit] = useState(null);
+      const [flashMsg, setFlashMsg] = useState(null);
+      // 一键分析防抖：进行中禁止重复点击（避免连点创建多个会话/重复扣费）
+      const [analyzing, setAnalyzing] = useState(false);
+      const analyzingRef = useRef(false);
+      // 到价提醒（系统通知）：开关持久化到 localStorage；触发状态记录 last 防重复弹
+      const [alertOn, setAlertOn] = useState(() => loadAlertCfg().enabled);
+      const alertOnRef = useRef(alertOn);
+      alertOnRef.current = alertOn;
+
+      // —— 到价提醒：每轮行情到达后检测「进入买点/卖点状态」的跃迁并弹通知 ——
+      // （必须先于 load 定义：load 的依赖数组引用了它）
+      const maybeAlert = useCallback((rows) => {
+        if (!alertOnRef.current || !Array.isArray(rows)) return;
+        try {
+          if (!alertsSupported() || Notification.permission !== "granted") return;
+          const cfg = loadAlertCfg();
+          let dirty = false;
+          for (const row of rows) {
+            if (!row.live) continue;
+            const cur = row.trigger;
+            if (cur !== "buy" && cur !== "sell") continue;
+            if (cfg.last[row.code] === cur) continue; // 已在该状态下通知过
+            cfg.last[row.code] = cur;
+            dirty = true;
+            notifyPriceAlert(row, cur);
+          }
+          if (dirty) saveAlertCfg(cfg);
+        } catch { /* ignore */ }
+      }, []);
+      // 列表排序模式
+      const [sortMode, setSortMode] = useState("default");
+      // 胶囊悬浮扇形菜单（行情分析 / 每日复盘 / 涨停分析：点击新开对话执行）
+      const [fanOpen, setFanOpen] = useState(false);
+      const fanOpenRef = useRef(false);
+      const fanBoxRef = useRef(null);
+      const gsapLibRef = useRef(null);
+      const fanTimerRef = useRef(null);
+      const dataRef = useRef(null);
+      const loadBusyRef = useRef(false);
+      // 价格闪烁：记录上一轮各代码价格，渲染时对比得出方向（effect 在渲染后写入）
+      const lastPricesRef = useRef({});
+      const flashTimerRef = useRef(null);
+      const dragRef = useRef(null);
+      const lastMousePosRef = useRef(null);
+      const suppressClickRef = useRef(false);
+      const pillRef = useRef(null);
+      const pillWidthRef = useRef(PILL_W);
+      // K线缩放控制：lightweight-charts timeScale 的 barSpacing 越大越放大，fitContent 还原
+      const klineChartApiRef = useRef(null);
+      const zoomKline = useCallback((factor) => {
+        const chart = klineChartApiRef.current;
+        if (!chart) return;
+        try {
+          const ts = chart.timeScale();
+          const cur = typeof ts.options().barSpacing === "number" ? ts.options().barSpacing : 6;
+          ts.applyOptions({ barSpacing: Math.min(60, Math.max(2, cur * factor)) });
+        } catch { /* 图表实例暂不可用则忽略 */ }
+      }, []);
+      const resetKline = useCallback(() => {
+        const chart = klineChartApiRef.current;
+        if (!chart) return;
+        try { chart.timeScale().fitContent(); } catch { /* 图表实例暂不可用则忽略 */ }
+      }, []);
+      const [pos, setPos] = useState(() => {
+        try {
+          const raw = window.localStorage.getItem(POS_KEY);
+          if (raw) {
+            const p = JSON.parse(raw);
+            if (typeof p.x === "number" && typeof p.y === "number") return p;
+          }
+        } catch { /* ignore */ }
+        return null;
+      });
+      // 面板尺寸（左下/右下角拉伸，localStorage 持久化；null = 默认 400px 宽 + 内容高）
+      const [size, setSize] = useState(() => {
+        try {
+          const raw = window.localStorage.getItem(SIZE_KEY);
+          if (raw) {
+            const s = JSON.parse(raw);
+            if (typeof s.w === "number" && typeof s.h === "number") return s;
+          }
+        } catch { /* ignore */ }
+        return null;
+      });
+      // MA 均线显隐配置（localStorage 持久化）
+      const [maVisible, setMaVisible] = useState(() => {
+        const def = { 5: true, 10: true, 20: true, 60: true };
+        try {
+          const raw = window.localStorage.getItem(MA_STORAGE_KEY);
+          if (raw) {
+            const p = JSON.parse(raw);
+            for (const k of MA_PERIODS) {
+              if (typeof p[k] === "boolean") def[k] = p[k];
+            }
+          }
+        } catch { /* ignore */ }
+        return def;
+      });
+      // 添加面板状态（menu / stock / group）
+      const [showAdd, setShowAdd] = useState(null);
+      const [stockQuery, setStockQuery] = useState("");
+      const [stockResults, setStockResults] = useState(null);
+      const [groupName, setGroupName] = useState("");
+      const [renameEdit, setRenameEdit] = useState(null);
+      const [renameTarget, setRenameTarget] = useState(null);
+
+      // 配置：服务器优先（任意浏览器/设备打开同一份），localStorage 仅作离线缓存；
+      // 服务器尚无配置（source !== "file"）而本地有 → 反向迁移：以本地为准并上传
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          let localGroups = null;
+          try {
+            const raw = window.localStorage.getItem(STORAGE_KEY);
+            const parsed = raw ? JSON.parse(raw) : null;
+            if (parsed && Array.isArray(parsed.groups) && parsed.groups.length > 0) localGroups = parsed.groups;
+          } catch { /* ignore */ }
+          let cfg = null;
+          try {
+            const res = await api("/config");
+            if (alive && res && Array.isArray(res.groups) && res.groups.length > 0 && res.source === "file") {
+              cfg = { groups: res.groups };
+            }
+          } catch { /* 离线/服务器异常时降级用本地缓存 */ }
+          if (!cfg && localGroups) {
+            cfg = { groups: localGroups };
+            postConfig(localGroups).catch(() => {}); // 首次反向迁移，失败不打断使用
+          }
+          if (!cfg) cfg = { groups: DEFAULT_GROUPS };
+          if (alive) setGroupsCfg(cfg.groups);
+        })();
+        return () => { alive = false; };
+      }, []);
+
+      // 配置变化 → 写回 localStorage（即时缓存）+ 防抖同步到服务器（唯一数据源）
+      const syncTimerRef = useRef(null);
+      useEffect(() => {
+        if (!groupsCfg) return;
+        try {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ groups: groupsCfg, updatedAt: Date.now() }));
+        } catch { /* ignore */ }
+        if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+        syncTimerRef.current = setTimeout(() => {
+          postConfig(groupsCfg).catch((e) => console.warn("[dsh-stock-watch] 配置同步服务器失败:", e));
+        }, 600); // 防抖：连续编辑只发最后一次；不放在 cleanup 里清除，卸载后仍补发
+      }, [groupsCfg]);
+
+      const load = useCallback(async (includeMinutes) => {
+        if (!groupsCfg || groupsCfg.length === 0) return;
+        // 在途防重叠：上一轮请求未结束（网络慢/超时）时跳过本轮，避免轮询堆积
+        if (loadBusyRef.current) return;
+        loadBusyRef.current = true;
+        try {
+          const res = await api("/quotes", { group: groupIndex, minutes: includeMinutes ? 1 : 0, groups: groupsCfg });
+          setData(res);
+          setError(null);
+          maybeAlert(res && Array.isArray(res.rows) ? res.rows : []);
+        } catch {
+          setError("行情服务不可用");
+        } finally {
+          loadBusyRef.current = false;
+        }
+      }, [groupIndex, groupsCfg, maybeAlert]);
+
+      const loadDetail = useCallback(async (code, per) => {
+        let refPrice = null;
+        const d = dataRef.current;
+        if (d && Array.isArray(d.rows)) {
+          const r = d.rows.find((x) => x.code === code);
+          if (r && r.live && typeof r.price === "number") refPrice = r.price;
+        }
+        try {
+          if (per === "minute") {
+            const res = await api("/minute", { code });
+            setMinute(res);
+          } else {
+            const res = await api("/kline", { code, period: per, refPrice });
+            setKline(res);
+          }
+        } catch {
+          if (per === "minute") setMinute({ code, points: [], prevClose: null, error: "分时获取失败" });
+          else setKline({ code, period: per, candles: [], error: "K线获取失败" });
+        }
+      }, []);
+
+      const flash = useCallback((text, color) => {
+        setFlashMsg({ text, color: color || YELLOW });
+        if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+        flashTimerRef.current = setTimeout(() => {
+          setFlashMsg(null);
+          flashTimerRef.current = null;
+        }, 2600);
+      }, []);
+
+      // —— 到价提醒：开关（开启时请求通知权限）——
+      const toggleAlert = useCallback(async () => {
+        if (!alertOnRef.current) {
+          if (!alertsSupported()) { flash("此浏览器不支持系统通知", YELLOW); return; }
+          try {
+            const p = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+            if (p !== "granted") { flash("通知权限未授予，无法到价提醒", YELLOW); return; }
+          } catch { flash("通知权限请求失败", YELLOW); return; }
+        }
+        setAlertOn((v) => {
+          const nv = !v;
+          const cfg = loadAlertCfg();
+          cfg.enabled = nv;
+          cfg.last = {}; // 关闭再开：重新允许通知一轮
+          saveAlertCfg(cfg);
+          return nv;
+        });
+        flash(alertOnRef.current ? "已关闭到价提醒" : "🔔 到价提醒已开启：触及买卖目标价时弹系统通知");
+      }, [flash]);
+
+      // 通用「新开对话发送分析请求」：创建新会话 → 发送简短消息 → 跳到新对话。
+      // 完整提示词由 host 端条件式系统提示注入（消息本身保持简短，不暴露完整提示词）。
+      const sendAnalysis = useCallback(async (text, label) => {
+        // 防抖：上一次请求未结束则忽略本次点击
+        if (analyzingRef.current) return;
+        const conn = (props && props.connection) || null;
+        const api = (conn && conn.api) || null;
+        const sessionsSvc = (props && props.sessionsService) || null;
+        if (!api || !sessionsSvc) {
+          flash((label || "分析") + "：会话服务不可用", YELLOW);
+          return;
+        }
+        analyzingRef.current = true;
+        setAnalyzing(true);
+        try {
+          // 1) 创建新会话：优先沿用当前会话所属 workspace；找不到则回退用当前会话的 cwd
+          const curId = sessions ? sessions.current : undefined;
+          const ws = (workspaces && Array.isArray(workspaces.items))
+            ? workspaces.items.find((w) => curId && Array.isArray(w.sessionIds) && w.sessionIds.indexOf(curId) >= 0)
+            : null;
+          let createPayload = {};
+          if (ws && ws.workspaceId) createPayload = { workspaceId: ws.workspaceId };
+          else {
+            const cur = (sessions && sessions.byId) ? sessions.byId[curId] : null;
+            if (cur && cur.cwd) createPayload = { cwd: cur.cwd };
+          }
+          const created = await api.sessions.create(createPayload);
+          if (!(created && created.result && created.result.ok)) throw new Error("创建新会话失败");
+          const sessionId = created.result.value && created.result.value.sessionId;
+          if (!sessionId) throw new Error("session.create 未返回 sessionId");
+          // 2) 向新会话发送提示词（排队执行）
+          const res = await api.sessions.prompt({
+            sessionId,
+            mode: "queue",
+            content: [{ type: "text", text }],
+          });
+          const accepted = !!(res && res.result && res.result.ok && res.result.value && res.result.value.accepted);
+          // 3) 跳到新对话；跳转失败如实提示（消息已发送，去会话列表查看）
+          let opened = true;
+          try { sessionsSvc.open(sessionId); } catch { opened = false; }
+          if (accepted) {
+            flash(opened ? "已在新对话发送「" + label + "」✓" : "「" + label + "」已发送 ✓ 未能自动跳转，请在会话列表查看", opened ? "#00ff41" : YELLOW);
+          } else {
+            flash("「" + label + "」请求未被接受", YELLOW);
+          }
+        } catch (e) {
+          flash((label || "分析") + "失败：" + ((e && e.message) || "未知错误"), "#ff5252");
+        } finally {
+          analyzingRef.current = false;
+          setAnalyzing(false);
+        }
+      }, [sessions, workspaces, props]);
+
+      // 一键投资研究报告：新开对话发送「分析{公司名}（代码）」，
+      // 完整技能指令（investment-research 分析 + frontend-design 生成网站）由 host 端条件式系统提示注入。
+      const analyzeStock = useCallback(async () => {
+        if (!view || !view.code) return;
+        const row = (data && Array.isArray(data.rows)) ? data.rows.find((r) => r.code === view.code) : null;
+        // 名称做控制字符清洗（防上游字段被污染的提示注入面），空则退回代码
+        const rawName = ((row && row.name) || "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+        const name = rawName || view.code;
+        await sendAnalysis("分析" + name + "（" + view.code + "）", "投资研究报告");
+      }, [view, data, sendAnalysis]);
+
+      // 目标价不可变更新 + 本地行同步（写入 localStorage 由持久化 effect 完成）
+      const applyTarget = useCallback((code, type, price) => {
+        const key = type === "buy" ? "buyPrice" : "sellPrice";
+        setGroupsCfg((prev) => {
+          if (!prev) return prev;
+          return prev.map((g, gi) => {
+            if (gi !== groupIndex) return g;
+            const existing = g.symbols.find((s) => s.code === code);
+            if (!existing && price === undefined) return g;
+            const symbols = existing
+              ? g.symbols.map((s) => {
+                  if (s.code !== code) return s;
+                  const copy = { ...s };
+                  if (price === undefined) delete copy[key];
+                  else copy[key] = price;
+                  return copy;
+                })
+              : [...g.symbols, { code, [key]: price }];
+            return { ...g, symbols };
+          });
+        });
+        setData((d) => {
+          if (!d || !Array.isArray(d.rows)) return d;
+          return {
+            ...d,
+            rows: d.rows.map((r) => {
+              if (r.code !== code) return r;
+              const copy = { ...r };
+              if (price === undefined) delete copy[key];
+              else copy[key] = price;
+              copy.trigger = copy.live ? computeTrigger(copy.price, copy.buyPrice, copy.sellPrice) : "none";
+              return copy;
+            }),
+          };
+        });
+      }, [groupIndex]);
+
+      const commitTargetEdit = useCallback((type) => {
+        if (!targetEdit || targetEdit.type !== type || !view) return;
+        const code = view.code;
+        const value = targetEdit.value;
+        setTargetEdit(null);
+        const label = type === "buy" ? "买入" : "卖出";
+        if (value.trim() === "") {
+          applyTarget(code, type, undefined);
+          flash("已清除" + label + "目标价", "#888888");
+          return;
+        }
+        const price = parseFloat(value);
+        if (!Number.isFinite(price) || price <= 0) {
+          flash("✘ 价格无效，未保存", "#ff5555");
+          return;
+        }
+        applyTarget(code, type, price);
+        flash("✔ 已设置" + label + "目标价 " + formatPrice(price));
+      }, [targetEdit, view, applyTarget, flash]);
+
+      // 首次展开时预加载 Lightweight Charts
+      useEffect(() => {
+        if (!expanded || lwc) return undefined;
+        let alive = true;
+        loadLightweightCharts().then((lib) => { if (alive) setLwc(lib); });
+        return () => { alive = false; };
+      }, [expanded, lwc]);
+
+      // 挂载即预加载 GSAP（胶囊悬浮扇形动画）
+      useEffect(() => {
+        let alive = true;
+        loadGsap().then((g) => { if (alive) gsapLibRef.current = g; });
+        return () => { alive = false; };
+      }, []);
+
+      // 扇形菜单开合控制（悬浮胶囊打开；移开延迟关闭，允许滑到选项上；拖动/展开时立即关闭）
+      const cancelFanClose = useCallback(() => {
+        if (fanTimerRef.current) { clearTimeout(fanTimerRef.current); fanTimerRef.current = null; }
+      }, []);
+      const openFan = useCallback(() => {
+        cancelFanClose();
+        setFanOpen(true);
+      }, [cancelFanClose]);
+      const scheduleFanClose = useCallback(() => {
+        if (fanTimerRef.current) clearTimeout(fanTimerRef.current);
+        fanTimerRef.current = setTimeout(() => setFanOpen(false), 380);
+      }, []);
+      const closeFanNow = useCallback(() => {
+        cancelFanClose();
+        setFanOpen(false);
+      }, [cancelFanClose]);
+      // 拖动/吸附结束后重置扇形归位：清除中断动画留下的冻结中间态（选项透明度/位移/盒子可见性），
+      // 恢复到初始闭合状态，保证下次悬浮能正常重新展开动画。
+      const resetFan = useCallback(() => {
+        cancelFanClose();
+        setFanOpen(false);
+        fanOpenRef.current = false; // 强制下一次 effect 视为"未展开"，重新走开启动画
+        const box = fanBoxRef.current;
+        if (!box) return;
+        const items = Array.from(box.querySelectorAll(".sk-fan-item"));
+        const g = gsapLibRef.current;
+        if (g && items.length) {
+          g.set(items, { xPercent: -50, yPercent: -50, x: 0, y: 0, scale: 0.3, autoAlpha: 0, rotation: -8, clearProps: "left,top" });
+        } else {
+          for (const el of items) { el.style.opacity = "0"; }
+        }
+        box.style.visibility = "hidden";
+        box.style.pointerEvents = "none";
+      }, [cancelFanClose]);
+      // 组件卸载时清理延迟关闭定时器
+      useEffect(() => () => {
+        if (fanTimerRef.current) clearTimeout(fanTimerRef.current);
+      }, []);
+
+      // 扇形菜单动作：新开对话发送简短关键词（完整提示词由 host 注入；closeFanNow 已在上方声明）
+      const fanAction = useCallback((kind) => {
+        const entry = kind === "quote"
+          ? { text: "行情分析", label: "行情分析" }
+          : kind === "review"
+            ? { text: "每日复盘", label: "每日复盘" }
+            : { text: "涨停分析", label: "涨停分析" };
+        closeFanNow();
+        sendAnalysis(entry.text, entry.label);
+      }, [closeFanNow, sendAnalysis]);
+
+      // 扇形选项 hover：GSAP 上浮 + 微放大（CSS 独立变换属性会被 GSAP 内联 translate:none 覆盖，故走 GSAP）
+      const hoverFanItem = useCallback((el, on) => {
+        const g = gsapLibRef.current;
+        if (!g || !el) return;
+        if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        g.to(el, { y: on ? "-=2.5" : "+=2.5", scale: on ? 1.05 : 1, duration: 0.18, ease: "power2.out", overwrite: "auto" });
+      }, []);
+
+      // 扇形菜单动画：打开时从胶囊中心扇形展开（GSAP back.out + 交错），关闭时收回
+      useEffect(() => {
+        if (expanded) return undefined;
+        const box = fanBoxRef.current;
+        if (!box) return undefined;
+        const items = Array.from(box.querySelectorAll(".sk-fan-item"));
+        if (items.length === 0) return undefined;
+        const wasOpen = fanOpenRef.current;
+        fanOpenRef.current = fanOpen;
+        if (!fanOpen && !wasOpen) { box.style.visibility = "hidden"; return undefined; }
+        const pill = pillRef.current;
+        const pw = pill ? pill.offsetWidth : PILL_W;
+        const ph = pill ? pill.offsetHeight : 30;
+        const geo = fanGeometry(pos, pw, ph);
+        const gsap = gsapLibRef.current;
+        const reduceMotion = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        // 展开扇形区域（悬浮热区）：覆盖「胶囊朝向扇形的那条边 → 选项 + 边距」。
+        // 返回区域左上角视口坐标，供选项绝对定位换算（容器已从全屏缩为区域）。
+        const applyFanRegion = () => {
+          const pr = pill ? pill.getBoundingClientRect() : { left: geo.cx, right: geo.cx, top: geo.cy, bottom: geo.cy };
+          const M = 36, HW = 56, HH = 24; // 热区边距加大：贴边/曲线移动/短暂停顿不易出区
+          let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+          for (const it of geo.items) {
+            x1 = Math.min(x1, geo.cx + it.dx - HW);
+            y1 = Math.min(y1, geo.cy + it.dy - HH);
+            x2 = Math.max(x2, geo.cx + it.dx + HW);
+            y2 = Math.max(y2, geo.cy + it.dy + HH);
+          }
+          const feX = geo.hDir === 1 ? pr.left : pr.right;
+          const feY = geo.vDir === 1 ? pr.top : pr.bottom;
+          x1 = Math.min(x1, feX) - M;
+          x2 = Math.max(x2, feX) + M;
+          y1 = Math.min(y1, feY) - M;
+          y2 = Math.max(y2, feY) + M;
+          box.style.left = x1 + "px";
+          box.style.top = y1 + "px";
+          box.style.width = (x2 - x1) + "px";
+          box.style.height = (y2 - y1) + "px";
+          box.style.pointerEvents = "auto";
+          return { x1, y1 };
+        };
+        if (fanOpen && wasOpen) {
+          // 已展开中：位置/尺寸变化时仅跟随刷新热区（不重播入场动画），避免胶囊移动后热区失配
+          applyFanRegion();
+          return undefined;
+        }
+        if (!fanOpen) {
+          // 关闭：收回胶囊中心
+          box.style.pointerEvents = "none";
+          if (gsap && !reduceMotion) {
+            const tl = gsap.timeline({ onComplete: () => { box.style.visibility = "hidden"; } });
+            tl.to(items, {
+              x: 0, y: 0, scale: 0.3, autoAlpha: 0, rotation: -8,
+              duration: 0.22, ease: "power2.in", stagger: 0.03, overwrite: "auto",
+            });
+            return () => { tl.kill(); };
+          }
+          box.style.visibility = "hidden";
+          return undefined;
+        }
+        // 打开：选项先叠在胶囊中心，再交错扇形展开（left/top 为相对容器的坐标）
+        if (gsap && !reduceMotion) {
+          box.style.visibility = "visible";
+          const { x1, y1 } = applyFanRegion();
+          gsap.set(items, { xPercent: -50, yPercent: -50, left: geo.cx - x1, top: geo.cy - y1, rotation: -10, scale: 0.35, autoAlpha: 0, x: 0, y: 0 });
+          const tl = gsap.timeline({
+            onComplete: () => {
+              // 动画结束后按禁用态补一次变暗（CSS opacity 会被 GSAP 内联 opacity:1 覆盖）
+              for (const el of items) {
+                if (el.classList.contains("sk-fan-item-disabled")) gsap.set(el, { opacity: 0.4 });
+              }
+            },
+          });
+          geo.items.forEach((it, i) => {
+            tl.to(items[i], {
+              x: it.dx, y: it.dy, scale: 1, autoAlpha: 1, rotation: 0,
+              duration: 0.5, ease: "back.out(1.7)",
+            }, i * 0.06);
+          });
+          return () => { tl.kill(); };
+        }
+        // 兜底（无 GSAP 或用户偏好减少动态）：直接落位
+        box.style.visibility = "visible";
+        const origin = applyFanRegion();
+        items.forEach((el, i) => {
+          const it = geo.items[i] || { dx: 0, dy: 0 };
+          el.style.left = (geo.cx - origin.x1) + "px";
+          el.style.top = (geo.cy - origin.y1) + "px";
+          el.style.transform = "translate(" + it.dx + "px, " + it.dy + "px) translate(-50%, -50%) scale(1)";
+          el.style.opacity = el.classList.contains("sk-fan-item-disabled") ? "0.4" : "1";
+        });
+        return undefined;
+      }, [fanOpen, expanded, pos]);
+
+      // 悬浮热区：扇形打开期间，指针在胶囊或扇形区域内就不收起（含胶囊与选项之间的空隙），
+      // 移出区域才延迟收拢。用全局 mousemove 包含性判断，避免「先经过区域再到胶囊」漏掉取消。
+      useEffect(() => {
+        if (!fanOpen || expanded) return undefined;
+        const within = (x, y, r) => r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+        const onMove = (e) => {
+          const inPill = within(e.clientX, e.clientY, pillRef.current ? pillRef.current.getBoundingClientRect() : null);
+          const inFan = within(e.clientX, e.clientY, fanBoxRef.current ? fanBoxRef.current.getBoundingClientRect() : null);
+          if (inPill || inFan) cancelFanClose();
+          else scheduleFanClose();
+        };
+        window.addEventListener("mousemove", onMove);
+        return () => window.removeEventListener("mousemove", onMove);
+      }, [fanOpen, expanded, cancelFanClose, scheduleFanClose]);
+
+      // —— 行情轮询主循环 ——
+      // 自调度 setTimeout（而非固定 setInterval）：每轮按当前状态重新决策间隔。
+      // · 交易时段：展开 10s / 折叠 30s；休市（午休/夜间/周末）：60s / 120s
+      // · 页面隐藏：暂停轮询；但开着到价提醒时保留 120s 保活轮询（后台也能触发通知）
+      const nextPollAtRef = useRef(0);
+      useEffect(() => {
+        let disposed = false;
+        let timer = null;
+        const waitMs = () => {
+          if (document.hidden) return alertOnRef.current ? POLL_ALERT_BG : 0; // 0 = 暂停
+          const active = marketActive();
+          return expanded
+            ? (active ? POLL_EXPANDED_FAST : POLL_EXPANDED_SLOW)
+            : (active ? POLL_COLLAPSED_FAST : POLL_COLLAPSED_SLOW);
+        };
+        const arm = () => {
+          const w = waitMs();
+          nextPollAtRef.current = w > 0 ? Date.now() + w : 0;
+          setCountdown(w > 0 ? Math.ceil(w / 1000) : 0);
+          if (w > 0 && !disposed) timer = setTimeout(run, w);
+        };
+        const run = async () => {
+          timer = null;
+          if (disposed) return;
+          // 隐藏且未开提醒：跳过拉取，仅重新布防；开着到价提醒时隐藏也照常拉取（保活）
+          if (!document.hidden || alertOnRef.current) await load(expanded);
+          if (disposed) return;
+          arm();
+        };
+        load(expanded); // 状态切换立即刷一次（与原行为一致；防重叠由 load 内部保证）
+        arm();
+        const onVisibility = () => {
+          if (disposed || document.hidden) return;
+          if (nextPollAtRef.current === 0 || !timer) { run(); return; } // 暂停中/无定时器 → 立即恢复
+          if (nextPollAtRef.current - Date.now() <= 0) {
+            clearTimeout(timer);
+            timer = null;
+            run();
+          }
+        };
+        document.addEventListener("visibilitychange", onVisibility);
+        return () => {
+          disposed = true;
+          if (timer) clearTimeout(timer);
+          document.removeEventListener("visibilitychange", onVisibility);
+        };
+      }, [expanded, load]);
+
+      // 倒计时显示：每秒递减到 0；实际刷新节奏由主循环决定（随交易时段 10s/30s/60s/120s 变化）
+      useEffect(() => {
+        if (!expanded) return undefined;
+        const id = setInterval(() => setCountdown((c) => (c > 0 ? c - 1 : 0)), 1000);
+        return () => clearInterval(id);
+      }, [expanded]);
+
+      // 详情视图：进入 / 切周期即刷；分时 10s、K 线 60s（盘中 K 线变化慢）；页面隐藏时跳过本轮
+      useEffect(() => {
+        if (!expanded || !view || !view.code) return undefined;
+        loadDetail(view.code, period);
+        const wait = period === "minute" ? POLL_DETAIL_MINUTE : (isIntradayPeriod(period) ? POLL_DETAIL_MK : POLL_DETAIL_KLINE);
+        const id = setInterval(() => {
+          if (!document.hidden) loadDetail(view.code, period);
+        }, wait);
+        return () => clearInterval(id);
+      }, [expanded, view, period, loadDetail]);
+
+      // 价格闪烁基准：本轮渲染完成后再写入最新价（下一轮渲染对比用）
+      useEffect(() => {
+        const m = {};
+        if (data && Array.isArray(data.rows)) {
+          for (const r of data.rows) if (r.live && typeof r.price === "number") m[r.code] = r.price;
+        }
+        lastPricesRef.current = m;
+      }, [data]);
+
+      // 配置变化时钳制分组下标
+      useEffect(() => {
+        if (data && Array.isArray(data.groups) && data.groups.length > 0) {
+          setGroupIndex((g) => Math.min(Math.max(g, 0), data.groups.length - 1));
+        }
+      }, [data]);
+
+      // —— 拖拽：窗口级 mousemove/mouseup ——
+      useEffect(() => {
+        const onMove = (e) => {
+          lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+          const d = dragRef.current;
+          if (!d) return;
+          const dx = e.clientX - d.startX;
+          const dy = e.clientY - d.startY;
+          if (d.mode === "resize") {
+            // 右下角：向右/下拉伸；左下角：向左/下拉伸（宽高钳制）
+            const dw = d.handle === "br" ? dx : -dx;
+            const w = Math.min(PANEL_MAX_W, Math.max(PANEL_MIN_W, d.baseW + dw));
+            const h = Math.min(PANEL_MAX_H, Math.max(PANEL_MIN_H, d.baseH + dy));
+            setSize({ w, h });
+            notifyChartResize();
+            return;
+          }
+          if (!d.moved && Math.abs(dx) + Math.abs(dy) > 4) d.moved = true;
+          if (d.moved) {
+            // 屏幕四周吸附：靠近边缘即贴边（贴边位置与半球尺寸一致，保证派生 dock 判定稳定）
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            let sx = d.baseX + dx;
+            let sy = d.baseY + dy;
+            if (sx <= SNAP_PX) sx = 0;
+            else if (sx >= vw - DOCK_W - SNAP_PX) sx = vw - DOCK_W;
+            if (sy <= SNAP_PX) sy = 0;
+            else if (sy >= vh - DOCK_H - SNAP_PX) sy = vh - DOCK_H;
+            setPos({ x: sx, y: sy });
+          }
+        };
+        const onUp = () => {
+          const d = dragRef.current;
+          dragRef.current = null;
+          // 只有真正拖动过（moved）才抑制随后的 click；普通点击不抑制 → 正常展开
+          if (d && d.mode === "pill" && d.moved) suppressClickRef.current = true;
+          // 胶囊拖动/吸附结束：重置扇形归位（清掉被中断动画冻结的中间态）；
+          // 若鼠标仍停在胶囊上，则立即重新展开，方便直接点选项（延迟到 React 提交新位置后再判断）
+          if (d && d.mode === "pill") {
+            resetFan();
+            setTimeout(() => {
+              const pr = pillRef.current ? pillRef.current.getBoundingClientRect() : null;
+              const mp = lastMousePosRef.current;
+              if (pr && mp && mp.x >= pr.left && mp.x <= pr.right && mp.y >= pr.top && mp.y <= pr.bottom) {
+                openFan();
+              }
+            }, 0);
+          }
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        return () => {
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+        };
+      }, []);
+
+      // 位置变化 → 持久化
+      useEffect(() => {
+        if (!pos) return;
+        try {
+          window.localStorage.setItem(POS_KEY, JSON.stringify(pos));
+        } catch { /* ignore */ }
+      }, [pos]);
+
+      // 尺寸变化 → 持久化
+      useEffect(() => {
+        if (!size) return;
+        try {
+          window.localStorage.setItem(SIZE_KEY, JSON.stringify(size));
+        } catch { /* ignore */ }
+      }, [size]);
+
+      // MA 显隐配置 → 持久化
+      useEffect(() => {
+        try {
+          window.localStorage.setItem(MA_STORAGE_KEY, JSON.stringify(maVisible));
+        } catch { /* ignore */ }
+      }, [maVisible]);
+
+      // 股票搜索（防抖 200ms，调 Host /stocks 全 A 股池）
+      useEffect(() => {
+        if (showAdd !== "stock") return undefined;
+        const q = stockQuery.trim();
+        if (!q) { setStockResults(null); return undefined; }
+        const timer = setTimeout(async () => {
+          try {
+            const res = await api("/stocks", { q });
+            setStockResults(res && Array.isArray(res.rows) ? res.rows : []);
+          } catch {
+            setStockResults([]);
+          }
+        }, 200);
+        return () => clearTimeout(timer);
+      }, [showAdd, stockQuery]);
+
+      // 添加股票到当前分组（当前分组重复 → 提示；其他分组重复 → 阻止；均不写入）
+      const addStock = useCallback((code, name) => {
+        const cur = (groupsCfg && groupsCfg[groupIndex]) || null;
+        const inCurrent = cur ? cur.symbols.some((s) => s.code === code) : false;
+        if (inCurrent) { flash("该股票已添加", "#888888"); return; }
+        const exists = (groupsCfg || []).some((g) => g.symbols.some((s) => s.code === code));
+        if (exists) { flash("已在其他分组：" + name, "#888888"); return; }
+        setGroupsCfg((prev) => (prev || []).map((g, gi) =>
+          gi === groupIndex ? { ...g, symbols: [...g.symbols, { code }] } : g));
+        const gname = (groupsCfg && groupsCfg[groupIndex]) ? groupsCfg[groupIndex].name : "";
+        flash("✔ 已添加 " + name + (gname ? " 到「" + gname + "」" : ""));
+        setStockQuery("");
+        setStockResults(null);
+        setShowAdd(null); // 添加完成 → 回到股票列表
+      }, [groupsCfg, groupIndex, flash]);
+
+      // 添加分组（空名拦截，创建后切到新分组）
+      const addGroup = useCallback(() => {
+        const name = groupName.trim();
+        if (!name) { flash("分组名不能为空", "#ff5555"); return; }
+        const newIndex = (groupsCfg || []).length;
+        setGroupsCfg((prev) => [...(prev || []), { name, symbols: [] }]);
+        setGroupIndex(newIndex);
+        setShowAdd(null);
+        flash("✔ 已创建分组「" + name + "」");
+      }, [groupName, groupsCfg, flash]);
+
+      // 重命名分组（renameTarget 指定哪个分组）
+      const commitRename = useCallback(() => {
+        if (renameTarget === null) return;
+        const name = (renameEdit || "").trim();
+        if (!name) { flash("分组名不能为空", "#ff5555"); return; }
+        setGroupsCfg((prev) => (prev || []).map((g, gi) => (gi === renameTarget ? { ...g, name } : g)));
+        setRenameEdit(null);
+        setRenameTarget(null);
+        flash("✔ 已重命名为「" + name + "」");
+      }, [renameEdit, renameTarget, flash]);
+
+      // 从当前分组删除股票（同步移除列表行）
+      const removeStock = useCallback((code, name) => {
+        setGroupsCfg((prev) => (prev || []).map((g, gi) =>
+          gi === groupIndex ? { ...g, symbols: g.symbols.filter((s) => s.code !== code) } : g));
+        setData((d) => (d && Array.isArray(d.rows)
+          ? { ...d, rows: d.rows.filter((r) => r.code !== code) }
+          : d));
+        flash("已删除 " + name, "#888888");
+      }, [groupIndex, flash]);
+
+      // 删除分组（确认提示；至少保留一个分组；删除后修正当前分组下标）
+      const deleteGroup = useCallback((idx) => {
+        const g = groupsCfg && groupsCfg[idx];
+        if (!g) return;
+        if ((groupsCfg || []).length <= 1) { flash("至少保留一个分组", "#ff5555"); return; }
+        if (!window.confirm("确定删除分组「" + g.name + "」吗？其包含 " + g.symbols.length + " 只股票")) return;
+        setGroupsCfg((prev) => (prev || []).filter((_, gi) => gi !== idx));
+        setGroupIndex((cur) => {
+          if (idx < cur) return cur - 1;
+          if (idx === cur) return 0;
+          return cur;
+        });
+        setView(null);
+        setShowAdd(null);
+        flash("已删除分组「" + g.name + "」", "#888888");
+      }, [groupsCfg, flash]);
+
+      // 按住胶囊/面板头部拖动（按钮/输入框上不触发）
+      const startDrag = useCallback((e, mode) => {
+        if (e.button !== 0) return;
+        const t = e.target;
+        if (t && t.closest && t.closest("button, input, a")) return;
+        // 新的交互开始：清掉上一次拖出后可能残留的点击抑制标记
+        suppressClickRef.current = false;
+        const base = pos || { x: window.innerWidth - PILL_W - 16, y: 14 };
+        dragRef.current = { startX: e.clientX, startY: e.clientY, baseX: base.x, baseY: base.y, moved: false, mode };
+        e.preventDefault();
+      }, [pos]);
+
+      // 按住面板左下/右下角拉伸尺寸
+      const startResize = useCallback((e, handle) => {
+        if (e.button !== 0) return;
+        const base = size || { w: 400, h: 0 };
+        dragRef.current = {
+          startX: e.clientX,
+          startY: e.clientY,
+          baseW: base.w,
+          baseH: base.h,
+          moved: true,
+          mode: "resize",
+          handle,
+        };
+        e.preventDefault();
+      }, [size]);
+
+      // 面板位置：右边缘与胶囊右边缘对齐（跟随胶囊）；尺寸：拖拽拉伸后固定
+      const panelStyle = (() => {
+        const st = {};
+        if (pos) {
+          const pw = pillWidthRef.current || PILL_W;
+          st.left = Math.max(8, Math.min(pos.x + pw - PANEL_W, window.innerWidth - PANEL_W - 8));
+          st.top = Math.max(8, Math.min(pos.y, window.innerHeight - 320));
+          st.right = "auto";
+        }
+        if (size) {
+          st.width = size.w + "px";
+          st.height = size.h + "px";
+          st.maxHeight = "none"; // 固定尺寸时取消 78vh 上限，拉伸才生效
+        }
+        return Object.keys(st).length ? st : undefined;
+      })();
+
+      dataRef.current = data;
+
+      const groups = (data && Array.isArray(data.groups)) ? data.groups : [];
+      const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+      const upCount = rows.filter((r) => r.live && r.changePercent > 0).length;
+      const downCount = rows.filter((r) => r.live && r.changePercent < 0).length;
+      // 市场情绪灯：列表头部底缘的双色比例条（涨家数 vs 跌家数；无数据时中性灰）
+      const moodEl = (() => {
+        const t = upCount + downCount;
+        return react.createElement("span", { className: "sk-mood", "aria-hidden": true },
+          t > 0
+            ? [
+                react.createElement("i", { key: "u", style: { width: Math.round((upCount * 100) / t) + "%", background: UP } }),
+                react.createElement("i", { key: "d", style: { flex: 1, background: DOWN, opacity: 0.9 } }),
+              ]
+            : react.createElement("i", { key: "n", style: { width: "100%", background: "var(--sk-border)" } }));
+      })();
+      const themeToggle = react.createElement("button", {
+        className: "sk-icon",
+        onClick: () => setTheme((t) => (t === "dark" ? "light" : "dark")),
+        title: theme === "dark" ? "切换到浅色主题" : "切换到暗色主题",
+      }, theme === "dark" ? "☀️" : "🌙");
+
+      // 面板右下角拉伸手柄（列表页与详情页共用）
+      const resizeHandles = react.createElement("div", { className: "sk-resize sk-resize-br", title: "拉伸面板", onMouseDown: (e) => startResize(e, "br") });
+
+      const sortCycle = useCallback(() => {
+        setSortMode((cur) => {
+          const idx = SORT_MODES.findIndex((s) => s.id === cur);
+          return SORT_MODES[(idx + 1) % SORT_MODES.length].id;
+        });
+      }, []);
+      const sortLabel = (SORT_MODES.find((s) => s.id === sortMode) || SORT_MODES[0]).label;
+
+      // 列表排序（自选股风格）：默认按配置顺序；未成交/缺数据的行排最后
+      const sortedRows = (() => {
+        if (!Array.isArray(rows) || rows.length === 0 || sortMode === "default") return rows;
+        const keyOf = (r) => {
+          if (sortMode === "priceDesc") return r.live && typeof r.price === "number" ? r.price : -Infinity;
+          const v = r.live && typeof r.changePercent === "number" ? r.changePercent : -Infinity;
+          return sortMode === "chgDesc" ? v : -v; // chgAsc 时取负值做降序排
+        };
+        return rows.slice().sort((a, b) => keyOf(b) - keyOf(a));
+      })();
+
+      // —— 折叠态：可拖动小药丸 ——
+      if (!expanded) {
+        const totalUD = upCount + downCount;
+        const upPct = totalUD > 0 ? Math.round((upCount * 100) / totalUD) : 50;
+        const summary = (data && rows.length > 0)
+          ? react.createElement("span", { className: "sk-pill-summary" },
+              react.createElement("span", { className: "sk-meter", title: "涨/跌家数占比" },
+                react.createElement("i", { className: "sk-meter-up", style: { width: upPct + "%" } }),
+                react.createElement("i", { className: "sk-meter-down" })),
+              react.createElement("span", { className: "sk-pill-count", style: { color: UP } }, upCount + "↑"),
+              react.createElement("span", { className: "sk-pill-count", style: { color: DOWN } }, downCount + "↓"))
+          : react.createElement("span", { className: "sk-pill-loading" }, error ? "⚠" : "…");
+        // 贴边吸附态：胶囊吸附到屏幕边缘后变为半球，显示涨/跌家数
+        const dock = (() => {
+          if (!pos) return null;
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          if (pos.x <= 0) return "left";
+          if (pos.x >= vw - DOCK_W - 2) return "right";
+          if (pos.y <= 0) return "top";
+          if (pos.y >= vh - DOCK_H - 2) return "bottom";
+          return null;
+        })();
+        const dockBody = dock
+          ? (data && rows.length > 0
+              ? react.createElement("span", { className: "sk-dock-body" },
+                  react.createElement("span", { className: "sk-dock-count", style: { color: UP } }, upCount + "↑"),
+                  react.createElement("span", { className: "sk-dock-count", style: { color: DOWN } }, downCount + "↓"))
+              : react.createElement("span", { className: "sk-pill-loading" }, error ? "⚠" : "…"))
+          : null;
+        if (pillRef.current) pillWidthRef.current = pillRef.current.offsetWidth || PILL_W;
+        const pill = react.createElement("div", {
+          className: "sk-pill sk-theme-" + theme + (dock ? " sk-dock sk-dock-" + dock : ""),
+          ref: pillRef,
+          style: pos ? { left: pos.x, top: pos.y, right: "auto" } : undefined,
+          onMouseDown: (e) => { startDrag(e, "pill"); closeFanNow(); },
+          onMouseEnter: openFan,
+          onClick: () => {
+            if (suppressClickRef.current) { suppressClickRef.current = false; return; }
+            closeFanNow();
+            setExpanded(true);
+          },
+        },
+          dock ? dockBody : [
+            react.createElement("span", { key: "t", className: "sk-pill-title" }, "📈 自选股"),
+            summary,
+          ]);
+        // 悬浮扇形菜单（行情分析 / 每日复盘 / 涨停分析：新开对话发送简短关键词）
+        // 每日复盘时段：仅 15:00–次日 9:00 可点击（复盘需当日收盘后数据）；9:00–15:00 交易时段置灰
+        const reviewState = (() => {
+          const now = new Date();
+          const mins = now.getHours() * 60 + now.getMinutes();
+          if (mins >= 9 * 60 && mins < 15 * 60) {
+            return { disabled: true, tip: "还未收盘，15:00 收盘后可查看每日复盘" };
+          }
+          return { disabled: false, tip: "查看每日复盘" };
+        })();
+        const fan = react.createElement("div", {
+          className: "sk-fan sk-theme-" + theme,
+          ref: fanBoxRef,
+        },
+          ["quote", "review", "limit"].map((k) => {
+            const meta = k === "quote"
+              ? { icon: "📊", label: "行情分析" }
+              : k === "review"
+                ? { icon: "📅", label: "每日复盘" }
+                : { icon: "🚀", label: "涨停分析" };
+            const reviewDisabled = k === "review" && reviewState.disabled;
+            return react.createElement("button", {
+              key: k,
+              className: "sk-fan-item" + (reviewDisabled ? " sk-fan-item-disabled" : ""),
+              title: k === "review" ? reviewState.tip : "「" + meta.label + "」点击后新开对话分析",
+              onMouseEnter: (e) => { cancelFanClose(); if (!reviewDisabled) hoverFanItem(e.currentTarget, true); },
+              onMouseLeave: (e) => { if (!reviewDisabled) hoverFanItem(e.currentTarget, false); },
+              onClick: () => { if (reviewDisabled) return; fanAction(k); },
+            },
+              react.createElement("span", { className: "sk-fan-icon" }, meta.icon),
+              react.createElement("span", null, meta.label));
+          }));
+        // 折叠态反馈 toast（建会话/发送结果提示）
+        const toast = flashMsg
+          ? react.createElement("div", { className: "sk-toast sk-theme-" + theme, style: { color: flashMsg.color } }, flashMsg.text)
+          : null;
+        return react.createElement(react.Fragment, null, pill, fan, toast);
+      }
+
+      // —— 详情视图 ——
+      if (view && view.code) {
+        const row = rows.find((r) => r.code === view.code);
+        const isMinute = period === "minute";
+        const m = (isMinute && minute && minute.code === view.code) ? minute : null;
+        const k = (!isMinute && kline && kline.code === view.code && kline.period === period) ? kline : null;
+        const candles = k && Array.isArray(k.candles) ? k.candles : [];
+        const isUp = row ? (row.live ? row.changePercent >= 0 : false) : false;
+        const color = row && row.live ? (isUp ? UP : DOWN) : FLAT;
+        const trig = row ? triggerMeta(row.trigger) : null;
+        const dark = theme === "dark";
+        const chartEl = isMinute
+          ? (lwc
+              ? react.createElement(MinuteChart, { lwc, points: m && Array.isArray(m.points) ? m.points : [], prevClose: m ? m.prevClose : null, height: 240, dark, fitKey: view.code + ":minute", fill: !!size })
+              : react.createElement(SvgMinute, { points: m && Array.isArray(m.points) ? m.points : [], prevClose: m ? m.prevClose : null, width: 380, height: 228, dark, fill: !!size }))
+          : (lwc
+              ? react.createElement(LwcChart, { lwc, candles, height: 240, dark, fitKey: view.code + ":" + period, maVisible, fill: !!size, chartApiRef: klineChartApiRef, intraday: isIntradayPeriod(period) })
+              : react.createElement(SvgCandles, { candles, width: 380, height: 228, fill: !!size }));
+        const footText = isMinute
+          ? (m === null ? "分时加载中…" : (m && m.error ? "分时：" + m.error : (m && Array.isArray(m.points) ? m.points.length + " 个分时点" : "")))
+          : (k === null ? "K线加载中…" : (k && k.error ? "K线：" + k.error : (candles.length + " 根K线")));
+        const targetChip = (type) => {
+          const label = type === "buy" ? "买入目标" : "卖出目标";
+          const key = type === "buy" ? "buyPrice" : "sellPrice";
+          const value = row ? row[key] : undefined;
+          if (targetEdit && targetEdit.type === type) {
+            return react.createElement("span", { className: "sk-target" },
+              react.createElement("span", null, label + " "),
+              react.createElement("input", {
+                className: "sk-target-input",
+                value: targetEdit.value,
+                autoFocus: true,
+                placeholder: "留空=清除",
+                onFocus: (e) => e.target.select(),
+                onChange: (e) => {
+                  const v = e.target.value;
+                  if (v === "" || /^\d*\.?\d{0,2}$/.test(v)) setTargetEdit({ type, value: v });
+                },
+                onKeyDown: (e) => {
+                  if (e.key === "Enter") commitTargetEdit(type);
+                  else if (e.key === "Escape") setTargetEdit(null);
+                },
+                onBlur: () => commitTargetEdit(type),
+              }));
+          }
+          return react.createElement("button", {
+            className: "sk-target sk-target-btn",
+            title: "点击编辑" + label + "（回车确认，留空清除，Esc 取消）",
+            onClick: () => setTargetEdit({ type, value: value !== undefined ? String(value) : "" }),
+          }, label + " " + (value !== undefined ? formatPrice(value) : "-"));
+        };
+        return react.createElement("div", { className: "sk-panel sk-theme-" + theme, style: panelStyle },
+          react.createElement("div", { className: "sk-detail-header", onMouseDown: (e) => startDrag(e, "panel"), title: "按住此处可拖动面板" },
+            react.createElement("div", { className: "sk-detail-top" },
+              react.createElement("button", { className: "sk-back", onClick: () => setView(null) }, "← 返回列表"),
+              react.createElement("button", { className: "sk-analyze", onClick: () => analyzeStock(), disabled: analyzing }, analyzing ? "📈 分析中…" : "📈 投资研究报告"),
+              react.createElement("button", { className: "sk-icon", onClick: () => setExpanded(false), title: "最小化回胶囊" }, "—")),
+            react.createElement("div", { className: "sk-detail-info" },
+              react.createElement("span", { className: "sk-detail-name" }, row ? row.name : view.code),
+              (() => {
+                const dprev = lastPricesRef.current[view.code];
+                const ddir = row && row.live && dprev !== undefined && row.price !== dprev ? (row.price > dprev ? " sk-flash-up" : " sk-flash-down") : "";
+                return react.createElement("span", { key: "dp-" + (row && row.price) + ddir, className: "sk-detail-price" + ddir, style: { color } }, row && row.live ? formatPrice(row.price) : "--");
+              })(),
+              react.createElement("span", {
+                className: "sk-detail-chg",
+                style: { color, background: row && row.live ? (isUp ? "var(--sk-up-soft)" : "var(--sk-down-soft)") : "transparent" },
+              }, row && row.live ? ((row.changePercent >= 0 ? "+" : "") + row.changePercent.toFixed(2) + "%") : ""),
+              trig ? react.createElement("span", { className: "sk-detail-trigger", style: { color: trig.c, borderColor: trig.c } }, trig.t) : null),
+            react.createElement("div", { className: "sk-detail-targets" }, targetChip("buy"), targetChip("sell")),
+            flashMsg ? react.createElement("div", { className: "sk-flash", style: { color: flashMsg.color } }, flashMsg.text) : null,
+            react.createElement("div", { className: "sk-periods" },
+              PERIOD_META.map((pm) =>
+                react.createElement("button", {
+                  key: pm.id,
+                  className: "sk-period" + (pm.id === period ? " sk-period-active" : ""),
+                  onClick: () => setPeriod(pm.id),
+                }, pm.label)))),
+            !isMinute && react.createElement("div", { className: "sk-ma-row" },
+              react.createElement("span", { className: "sk-zoom" },
+                react.createElement("button", { className: "sk-zoom-btn", title: "缩小K线", onClick: () => zoomKline(1 / 1.35) }, "−"),
+                react.createElement("button", { className: "sk-zoom-btn", title: "放大K线", onClick: () => zoomKline(1.35) }, "+"),
+                react.createElement("button", { className: "sk-zoom-btn", title: "重置K线缩放", onClick: () => resetKline() }, "重置")),
+              react.createElement("span", { className: "sk-ma-chips" },
+                MA_PERIODS.map((p) => {
+                  const on = !!maVisible[p];
+                  return react.createElement("button", {
+                    key: p,
+                    className: "sk-ma-chip" + (on ? "" : " sk-ma-chip-off"),
+                    title: (on ? "隐藏" : "显示") + " MA" + p,
+                    onClick: () => setMaVisible((v) => ({ ...v, [p]: !v[p] })),
+                  },
+                    react.createElement("span", { className: "sk-ma-dot", style: { background: maColor(p, dark) } }),
+                    "MA" + p);
+                }))),
+          // 图表 + 指标网格 + 五档盘口：放入可滚动区，避免详情内容超高被裁剪
+          react.createElement("div", { className: "sk-detail-body" },
+            chartEl,
+            react.createElement(StatGrid, { row }),
+            react.createElement(OrderBook, { row })),
+          react.createElement("div", { className: "sk-detail-foot" },
+            react.createElement("span", null, footText),
+            react.createElement("span", { className: "sk-right" }, themeToggle,
+              react.createElement("span", { className: "sk-countdown" }, "⏱" + countdown + "s"))),
+          resizeHandles);
+      }
+
+      // —— 列表视图 ——
+      const header = react.createElement("div", { className: "sk-header", onMouseDown: (e) => startDrag(e, "panel"), title: "按住此处可拖动面板" },
+        react.createElement("span", { className: "sk-title" }, "📈 自选股盯盘"),
+        react.createElement("span", { className: "sk-tabs" },
+          groups.map((g, i) =>
+            react.createElement("span", { key: i, className: "sk-tab-wrap" + (i === groupIndex ? " sk-tab-wrap-active" : "") },
+              renameTarget === i
+                ? react.createElement("input", {
+                    className: "sk-rename-input",
+                    value: renameEdit,
+                    autoFocus: true,
+                    placeholder: "分组名称…",
+                    onChange: (e) => setRenameEdit(e.target.value),
+                    onKeyDown: (e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") { setRenameEdit(null); setRenameTarget(null); } },
+                    onBlur: () => commitRename(),
+                  })
+                : react.createElement("button", {
+                    className: "sk-tab" + (i === groupIndex ? " sk-tab-active" : ""),
+                    onClick: () => setGroupIndex(i),
+                    onDoubleClick: (e) => { e.preventDefault(); setRenameTarget(i); setRenameEdit(g.name); },
+                    title: "双击重命名「" + g.name + "」",
+                  }, g.name + (g.count > 0 ? " (" + g.count + ")" : "")),
+              react.createElement("button", {
+                className: "sk-tab-del",
+                title: "删除分组「" + g.name + "」",
+                onClick: (e) => { e.stopPropagation(); deleteGroup(i); },
+              }, "✕")))),
+        react.createElement("span", { className: "sk-right" },
+          react.createElement("button", {
+            className: "sk-zoom-btn sk-sort-btn",
+            onClick: sortCycle,
+            title: "切换列表排序（默认/涨幅↓/涨幅↑/现价↓）",
+          }, "⇅ " + sortLabel),
+          react.createElement("button", {
+            className: "sk-icon",
+            onClick: () => toggleAlert(),
+            title: alertOn ? "到价提醒已开启（点击关闭）" : "开启到价提醒：触及买卖目标价时弹系统通知",
+          }, alertOn ? "🔔" : "🔕"),
+          react.createElement("span", { className: "sk-countdown" }, "⏱" + countdown + "s"),
+          themeToggle,
+          react.createElement("button", { className: "sk-icon", onClick: () => load(true), title: "立即刷新" }, "⟳"),
+          react.createElement("button", { className: "sk-icon", onClick: () => setExpanded(false), title: "折叠" }, "—"),
+          moodEl));
+
+      // 面板定高时列表区域 flex:1 1 0 强制填满并滚动
+      const rowsFill = size ? { flex: "1 1 0", minHeight: 0 } : undefined;
+      const body = rows.length === 0
+        ? react.createElement("div", { className: "sk-empty", style: rowsFill }, error ? "行情获取失败，请稍后重试" : "（当前分组为空）")
+        : react.createElement("div", { className: "sk-rows", style: rowsFill },
+            sortedRows.map((row) => {
+              const isUp = row.live && row.changePercent >= 0;
+              const color = row.live ? (isUp ? UP : DOWN) : FLAT;
+              const trig = triggerMeta(row.trigger);
+              const tip = "高 " + (row.live ? formatPrice(row.high) : "-") + " · 低 " + (row.live ? formatPrice(row.low) : "-") + " · 量 " + (row.live ? row.volume : "-");
+              return react.createElement("div", { key: row.code, className: "sk-row", onClick: () => setView({ code: row.code }), title: tip },
+                react.createElement("span", { className: "sk-name" },
+                  react.createElement("span", { className: "sk-name-text", style: { color: row.live ? "var(--sk-text)" : FLAT } }, row.name),
+                  react.createElement("span", { className: "sk-code" }, row.code.replace(/^(sh|sz)/, ""))),
+                react.createElement(Sparkline, { prices: row.minutes, color }),
+                (() => {
+                  const prevP = lastPricesRef.current[row.code];
+                  const pdir = !row.live || prevP === undefined || row.price === prevP ? "" : (row.price > prevP ? " sk-flash-up" : " sk-flash-down");
+                  return react.createElement("span", { key: "p" + row.price + pdir, className: "sk-price" + pdir, style: { color } }, row.live ? formatPrice(row.price) : "--");
+                })(),
+                react.createElement("span", {
+                  key: "c" + row.changePercent,
+                  className: "sk-chg",
+                  style: { color, background: row.live ? (isUp ? "var(--sk-up-soft)" : "var(--sk-down-soft)") : "transparent" },
+                }, row.live ? ((row.changePercent >= 0 ? "+" : "") + row.changePercent.toFixed(2) + "%") : ""),
+                trig
+                  ? react.createElement("span", { className: "sk-trigger", style: { color: trig.c, borderColor: trig.c } }, trig.t)
+                  : react.createElement("span", { className: "sk-trigger sk-trigger-none" }, "-"),
+                react.createElement("button", {
+                  className: "sk-del",
+                  title: "从列表删除 " + row.name,
+                  onClick: (e) => { e.stopPropagation(); removeStock(row.code, row.name); },
+                }, "✕"));
+            }));
+
+      const footer = react.createElement("div", { className: "sk-footer" },
+        react.createElement("span", { className: "sk-foot-left", title: data && data.diag && data.diag.firstError ? data.diag.firstError : "" },
+          data && data.live ? "腾讯行情" : (error ? "行情获取失败" : (data ? (data.diag && data.diag.firstError ? "行情失败：" + data.diag.firstError : "无实时数据") : "—"))),
+        react.createElement("span", { className: "sk-foot-mid" }, data ? "更新 " + new Date(data.updatedAt).toLocaleTimeString("zh-CN", { hour12: false }) : ""),
+        react.createElement("span", { className: "sk-foot-right", title: data && data.config ? (data.config.path || "") : "" },
+          data && data.config && data.config.source === "local"
+            ? "配置：localStorage"
+            : (data && data.config && data.config.source === "file" ? "~/.stocking/settings.json" : "默认分组")));
+
+      // 添加面板（菜单 / 股票搜索 / 分组创建）
+      const addPanel = showAdd ? react.createElement("div", { className: "sk-add-mask" },
+        react.createElement("div", { className: "sk-add-panel" },
+          react.createElement("div", { className: "sk-add-head" },
+            react.createElement("span", { className: "sk-add-title" },
+              showAdd === "stock" ? "添加股票" : "添加分组"),
+            react.createElement("button", { className: "sk-icon", onClick: () => setShowAdd(null), title: "关闭" }, "✕")),
+          showAdd === "stock" && react.createElement("div", { className: "sk-add-stock" },
+            react.createElement("input", {
+              className: "sk-add-input",
+              value: stockQuery,
+              autoFocus: true,
+              placeholder: "输入代码或名称搜索…",
+              onChange: (e) => setStockQuery(e.target.value),
+              onKeyDown: (e) => { if (e.key === "Escape") setShowAdd(null); },
+            }),
+            stockResults === null
+              ? react.createElement("div", { className: "sk-add-empty" }, "输入代码或名称开始搜索")
+              : stockResults.length === 0
+                ? react.createElement("div", { className: "sk-add-empty" }, "未找到匹配的股票")
+                : react.createElement("div", { className: "sk-add-results" },
+                    stockResults.map((s) => {
+                      const inCurrent = (groupsCfg && groupsCfg[groupIndex] && groupsCfg[groupIndex].symbols.some((x) => x.code === s.code)) || false;
+                      return react.createElement("button", {
+                        key: s.code,
+                        className: "sk-add-result" + (inCurrent ? " sk-add-result-added" : ""),
+                        onClick: () => addStock(s.code, s.name),
+                      },
+                        react.createElement("span", { className: "sk-add-result-code" }, s.code.replace(/^(sh|sz)/, "")),
+                        react.createElement("span", { className: "sk-add-result-name" }, s.name),
+                        inCurrent ? react.createElement("span", { className: "sk-add-result-badge" }, "已添加") : null);
+                    }))),
+          showAdd === "group" && react.createElement("div", { className: "sk-add-group" },
+            react.createElement("input", {
+              className: "sk-add-input",
+              value: groupName,
+              autoFocus: true,
+              placeholder: "分组名称…",
+              onChange: (e) => setGroupName(e.target.value),
+              onKeyDown: (e) => { if (e.key === "Enter") addGroup(); else if (e.key === "Escape") setShowAdd(null); },
+            }),
+            react.createElement("button", { className: "sk-add-confirm", onClick: addGroup }, "创建")))) : null;
+
+      // 分组列表底部：添加股票 / 分组 按钮
+      const addBar = react.createElement("div", { className: "sk-add-bar" },
+        react.createElement("button", { className: "sk-add-bar-btn", onClick: () => setShowAdd("stock") }, "＋ 添加股票"),
+        react.createElement("button", { className: "sk-add-bar-btn", onClick: () => setShowAdd("group") }, "🗂 添加分组"));
+
+      return react.createElement("div", { className: "sk-panel sk-theme-" + theme, style: panelStyle }, header, body, addBar, footer, resizeHandles, addPanel);
+    }
+
+    // ------------------------------------------------------------------ 插件主体
+    /** Required services: slots（布局挂载点）。 */
+    const inject = ["slots"];
+
+    /**
+     * Client plugin body：在 shell.overlay 注册右上角盯盘弹窗。
+     * @param ctx - client root context。
+     */
+    function apply(ctx) {
+      ctx.slots.inject("shell.overlay", () => ctx.slots.register({
+        name: "shell.overlay",
+        id: "dsh-stock-watch",
+      }, (props) => react.createElement(WatchPanel, Object.assign({}, props, {
+        connection: ctx.get("connection"),
+        sessionsService: ctx.get("sessions"),
+      }))));
+    }
+
+    exports.apply = apply;
+    exports.inject = inject;
+    return module.exports;
+  },
+});
